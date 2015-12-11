@@ -54,6 +54,8 @@ AM_CFLAGS = \
 	-Wno-unused-variable \
 	-Wno-unused-but-set-variable \
 	-Wno-unused-function \
+	-I/usr/include/speech-dispatcher \
+	-L/usr/lib/x86_64-linux-gnu \
 	$(NULL)
 
 AM_LDADD = \
@@ -64,6 +66,7 @@ AM_LDADD = \
 	@GTK3_LIBS@ \
 	@X11_LIBS@ \
 	-lXi \
+	-lspeechd \
 	$(libibus) \
 	$(NULL)
 
@@ -121,6 +124,7 @@ ibus_ui_gtk3_SOURCES = \
 	xkblayout.vala \
 	gen-notification-item.xml.c \
 	gen-notification-watcher.xml.c \
+	ibusspeech.c \
 	$(NULL)
 
 ibus_ui_gtk3_LDADD = \

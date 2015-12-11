@@ -20,6 +20,8 @@
  * USA
  */
 
+extern void ibs_init();
+
 class Application {
     private IBus.Bus m_bus;
     private Panel m_panel;
@@ -61,6 +63,9 @@ class Application {
                 IBus.BusNameFlag.ALLOW_REPLACEMENT |
                 IBus.BusNameFlag.REPLACE_EXISTING;
         m_bus.request_name(IBus.SERVICE_PANEL, flags);
+       
+        // init ibusspeech
+        ibs_init();
     }
 
     public int run() {
