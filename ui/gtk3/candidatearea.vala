@@ -91,6 +91,7 @@ class CandidateArea : Gtk.Box {
     public void set_candidates(IBus.Text[] candidates,
                                uint focus_candidate = 0,
                                bool show_cursor = true) {
+        debug("[hgneng] enter set_candidates: %ud/%d", focus_candidate, candidates.length);
         m_ibus_candidates = candidates;
         m_focus_candidate = focus_candidate;
         m_show_cursor = show_cursor;
