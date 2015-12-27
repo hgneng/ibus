@@ -109,6 +109,9 @@ public class CandidatePanel : Gtk.Box{
     }
 
     private void set_labels(IBus.Text[] labels) {
+        for (int i = 0; i < labels.length; i++) {
+          debug("[hgneng] set_labels: %s", labels[i].get_text());
+        }
         m_candidate_area.set_labels(labels);
     }
 
@@ -212,6 +215,7 @@ public class CandidatePanel : Gtk.Box{
     }
 
     private void update() {
+        debug("[hgneng] update");
         if (m_candidate_area.get_visible() ||
             m_preedit_label.get_visible() ||
             m_aux_label.get_visible())
@@ -237,6 +241,7 @@ public class CandidatePanel : Gtk.Box{
     }
 
     private void create_ui() {
+        debug("[hgneng] create_ui");
         m_preedit_label = new Gtk.Label(null);
         m_preedit_label.set_size_request(20, -1);
         m_preedit_label.set_halign(Gtk.Align.START);
@@ -275,6 +280,7 @@ public class CandidatePanel : Gtk.Box{
     }
 
     public new void show() {
+        debug("[hgneng] show");
         m_toplevel.show_all();
     }
 

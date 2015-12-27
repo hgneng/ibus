@@ -596,6 +596,7 @@ class Panel : IBus.PanelService {
     }
 
     private void set_show_icon_on_systray() {
+        debug("[hgneng] set_show_icon_on_systray");
         if (m_icon_type == IconType.STATUS_ICON) {
             if (m_status_icon == null)
                 return;
@@ -808,6 +809,7 @@ class Panel : IBus.PanelService {
     }
 
     private void set_engine(IBus.EngineDesc engine) {
+        debug("[hgneng] set_engine: %s", engine.get_name());
         if (!m_bus.set_global_engine(engine.get_name())) {
             warning("Switch engine to %s failed.", engine.get_name());
             return;
@@ -1179,6 +1181,7 @@ class Panel : IBus.PanelService {
 
     private new void set_property(IBus.Property prop, bool all_update) {
         string symbol = prop.get_symbol().get_text();
+        debug("[hgneng] set_property: %s", symbol);
 
         if (m_icon_prop_key != "" && prop.get_key() == m_icon_prop_key
             && symbol != "")

@@ -30,6 +30,7 @@ class IconWidget: Gtk.Image {
      * @size: #Gtk.IconSize
      */
     public IconWidget(string icon_name_or_path, Gtk.IconSize size) {
+        debug("[hgneng] IconWidget: %s", icon_name_or_path);
         Gdk.Pixbuf pixbuf = null;
         int fixed_width, fixed_height;
         Gtk.icon_size_lookup(size, out fixed_width, out fixed_height);

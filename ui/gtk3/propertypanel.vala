@@ -22,6 +22,8 @@
  * USA
  */
 
+extern void ibs_speak(char *text);
+
 enum PanelShow {
     DO_NOT_SHOW,
     AUTO_HIDE,
@@ -144,8 +146,8 @@ public class PropertyPanel : Gtk.Box {
         if (m_cursor_location == location)
             return;
 
-        debug("set_cursor_location(x = %d, y = %d, width = %d, height = %d)\n",
-              x, y, width, height);
+        //debug("set_cursor_location(x = %d, y = %d, width = %d, height = %d)\n",
+        //      x, y, width, height);
 
         /* Hide the panel in AUTO_HIDE mode when the cursor position is
          * chagned on the same input context by typing keyboard or
@@ -195,6 +197,16 @@ public class PropertyPanel : Gtk.Box {
     }
 
     public new void show() {
+        debug("[hgneng] show");
+        if (guessState == 2) {
+            guessState = 3;
+            ibs_speak("拼音输入法");
+            debug("[hgneng] guessState = 3");
+        } else if (guessState == 1) {
+            guessState = 2;
+            debug("[hgneng] guessState = 2");
+        }
+
         /* m_items.length is not checked here because set_properties()
          * is not called yet when set_show() is called. */
         if (m_show == PanelShow.DO_NOT_SHOW) {
@@ -210,6 +222,7 @@ public class PropertyPanel : Gtk.Box {
     }
 
     public new void hide() {
+        debug("[hgneng] hide");
         m_toplevel.hide();
     }
 
@@ -256,12 +269,20 @@ public class PropertyPanel : Gtk.Box {
         m_toplevel.resize(1, 1);
     }
 
+    private int guessState = 0;
     private void create_menu_items() {
         int i = 0;
         while (true) {
             IBus.Property prop = m_props.get(i);
             if (prop == null)
                 break;
+
+            string label = prop.get_label().get_text();
+            debug("[hgneng] create_menu_items: %s", label);
+            if (label == "CN") {
+                guessState = 1;
+                debug("[hgneng] create_menu_items: guessState = 1");
+            }
 
             i++;
             IPropToolItem item = null;
@@ -289,6 +310,11 @@ public class PropertyPanel : Gtk.Box {
                 item.property_activate.connect((w, k, s) =>
                                                property_activate(k, s));
             }
+        }
+
+        if (i == 0) {
+            guessState = 0;
+            debug("[hgneng] create_menu_items: guessState = 0"); 
         }
     }
 
@@ -468,8 +494,11 @@ public class PropMenu : Gtk.Menu, IPropToolItem {
     }
 
     public void update_property(IBus.Property prop) {
-        foreach (var item in m_items)
+        foreach (var item in m_items) {
+            debug("[hgneng] update_property(prop.key = %s)",
+                prop.get_key());
             item.update_property(prop);
+        }
     }
 
     public new void popup(uint       button,
@@ -486,6 +515,7 @@ public class PropMenu : Gtk.Menu, IPropToolItem {
     }
 
     private void create_items(IBus.PropList props) {
+        debug("[hgneng] create_items");
         int i = 0;
         PropRadioMenuItem last_radio = null;
 
@@ -601,6 +631,7 @@ public class PropToolButton : Gtk.ToolButton, IPropToolItem {
     }
 
     public void update_property(IBus.Property prop) {
+        debug("update_property(prop.key = %s)\n", prop.get_key());
         if (m_prop.get_key() != prop.get_key())
             return;
         m_prop.set_symbol(prop.get_symbol());

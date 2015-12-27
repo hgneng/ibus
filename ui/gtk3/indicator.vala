@@ -101,6 +101,7 @@ class Indicator : IBus.Service
     public Indicator(string id,
                      GLib.DBusConnection connection,
                      Category category = Category.OTHER) {
+        debug("[hgneng] Indicator: %s", id);
         string path = DEFAULT_ITEM_PATH + "/" + id;
         path = path.delimit("-", '_');
 
@@ -232,6 +233,7 @@ class Indicator : IBus.Service
     }
 
     private GLib.Variant? _get_icon_name(GLib.DBusConnection connection) {
+        debug("[hgnneg] _get_icon_name: %s", this.icon_name);
         return new GLib.Variant.string(this.icon_name);
     }
 

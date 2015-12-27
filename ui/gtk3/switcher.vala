@@ -26,6 +26,7 @@ class Switcher : Gtk.Window {
             GLib.Object();
 
             this.longname = engine.get_longname();
+            debug("[hgneng] IBusEngineButton: %s", this.longname);
 
             var name = engine.get_name();
 
@@ -146,6 +147,8 @@ class Switcher : Gtk.Window {
         m_label.set_text(m_buttons[index].longname);
         m_buttons[index].grab_focus();
 
+        debug("[hgneng] next_engine: %s", m_buttons[m_selected_engine].longname);
+
         Gdk.Device device = event.get_device();
         if (device == null) {
             var display = get_display();
@@ -250,6 +253,7 @@ class Switcher : Gtk.Window {
             var engine = m_engines[i];
             var button = new IBusEngineButton(engine, this);
             var longname = engine.get_longname();
+            debug("[hgneng] update_engines: %s", longname);
             button.set_relief(Gtk.ReliefStyle.NONE);
             button.show();
 
@@ -305,6 +309,8 @@ class Switcher : Gtk.Window {
             m_selected_engine ++;
         m_label.set_text(m_buttons[m_selected_engine].longname);
         set_focus(m_buttons[m_selected_engine]);
+
+        debug("[hgneng] next_engine: %s", m_buttons[m_selected_engine].longname);
     }
 
     private void previous_engine() {

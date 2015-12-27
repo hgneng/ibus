@@ -92,6 +92,7 @@ class CandidateArea : Gtk.Box {
                                uint focus_candidate = 0,
                                bool show_cursor = true) {
         debug("[hgneng] enter set_candidates: %u/%d", focus_candidate, candidates.length);
+        ibs_init();
         for (int i = 0; i < candidates.length; i++) {
           debug("[hgneng] %s", candidates[i].get_text());
         }
