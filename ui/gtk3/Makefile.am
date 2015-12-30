@@ -125,6 +125,7 @@ ibus_ui_gtk3_SOURCES = \
 	gen-notification-item.xml.c \
 	gen-notification-watcher.xml.c \
 	ibusspeech.c \
+	chinesedict.c \
 	$(NULL)
 
 ibus_ui_gtk3_LDADD = \
