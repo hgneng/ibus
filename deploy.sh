@@ -1,5 +1,5 @@
 #!/bin/bash
-sudo apt-get install -y gnome-common gtk-doc-tools libdconf-dev libnotify-dev valac libgtk-3-dev
+sudo apt-get install -y gnome-common gtk-doc-tools libdconf-dev libnotify-dev valac libgtk-3-dev im-config
 sudo apt-get install -y libspeechd-dev
 sudo apt-get install -y ibus-pinyin
 

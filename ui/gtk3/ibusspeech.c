@@ -20,18 +20,18 @@ void ibs_destroy() {
 }
 
 void ibs_speak(char *text) {
-  printf("ibs_speak:%s\n", text);
+  //printf("ibs_speak:%s\n", text);
   //spd_cancel(g_spd);
   spd_say(g_spd, SPD_TEXT, text);
 }
 
 void ibs_speak_politely(char *text) {
-  printf("ibs_speak_politely:%s\n", text);
+  //printf("ibs_speak_politely:%s\n", text);
   spd_say(g_spd, SPD_MESSAGE, text);
 }
 
 void ibs_stop() {
-  printf("ibs_stop\n");
+  //printf("ibs_stop\n");
   spd_cancel(g_spd);
 }
 
