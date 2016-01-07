@@ -9,6 +9,8 @@ sudo apt-get install -y ibus-pinyin
 
 make
 
+ps -ef | grep 'ibus-ui-gtk3' | grep -v grep | awk '{print $2}' | xargs kill
+
 sudo make install
 
 ui/gtk3/ibus-ui-gtk3&

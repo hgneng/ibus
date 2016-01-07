@@ -94,29 +94,41 @@ class CandidateArea : Gtk.Box {
             m_labels[i].set_text(LABELS[i]);
     }
 
+    public void read_candidate(uint pos, IBus.Text text, bool read_word_character = true) {
+      string str = text.get_text();
+      if (!read_word_character && text.get_length() > 1) {
+        ibs_speak_politely(pos.to_string() + str);
+      } else {
+        int i = 0;
+        unichar c = 0;
+        string speech = pos.to_string();
+        while (str.get_next_char(ref i, out c)) {
+          int code = (int)c;
+          if (code >= ibs_word_begin && code <= ibs_word_end && ibs_words[code - ibs_word_begin] != null)
+            speech += (string)ibs_words[code - ibs_word_begin] + "的" + c.to_string();
+          else
+            speech += c.to_string();
+        }
+        
+        ibs_speak_politely(speech);
+      }
+    }
+
     public void set_candidates(IBus.Text[] candidates,
                                uint focus_candidate = 0,
                                bool show_cursor = true) {
         debug("[hgneng] enter set_candidates: %u/%d", focus_candidate, candidates.length);
         ibs_stop();
         if (focus_candidate > 0) {
-          string text = candidates[focus_candidate].get_text();
-          int code = (int)text.get_char();
-          if (code >= ibs_word_begin && code <= ibs_word_end && ibs_words[code - ibs_word_begin] != null)
-            ibs_speak((focus_candidate + 1).to_string() + (string)ibs_words[code - ibs_word_begin] + "的" + text);
-          else
-            ibs_speak((focus_candidate + 1).to_string() + text);
+          // read current candidate
+          read_candidate(focus_candidate + 1, candidates[focus_candidate]);
         } else {
+          // read candidate list
           for (int i = 0; i < candidates.length; i++) {
-            string text = candidates[i].get_text();
-            int char_code = (int)text.get_char();
-            if (char_code >= ibs_word_begin && char_code <= ibs_word_end && ibs_words[char_code - ibs_word_begin] != null) {
-              // debug("[hgneng] %d %s: %s", i, text, (string)ibs_words[char_code - ibs_word_begin]);
-              ibs_speak_politely((i + 1).to_string() + (string)ibs_words[char_code - ibs_word_begin] + "的" + text);
-            } else {
-              // debug("[hgneng] %d %s", i, text);
-              ibs_speak_politely((i + 1).to_string() + text);
-            }
+            if (candidates.length > 1 && candidates[1].get_length() > 1)
+              read_candidate(i + 1, candidates[i]);
+            else
+              read_candidate(i + 1, candidates[i], false);
           }
         }
 
