@@ -94,24 +94,40 @@ class CandidateArea : Gtk.Box {
             m_labels[i].set_text(LABELS[i]);
     }
 
-    public void read_candidate(uint pos, IBus.Text text, bool read_word_character = true) {
+    public bool read_candidate(uint pos, IBus.Text text, bool read_word_character = true) {
       string str = text.get_text();
       if (!read_word_character && text.get_length() > 1) {
-        ibs_speak_politely(pos.to_string() + str);
+        if (pos > 0)
+          ibs_speak_politely(pos.to_string() + str);
+        else
+          ibs_speak_politely(str);
       } else {
         int i = 0;
         unichar c = 0;
-        string speech = pos.to_string();
+        string speech = "";
+        if (pos > 0)
+          speech += pos.to_string();
+
+        bool confuse = false;
         while (str.get_next_char(ref i, out c)) {
           int code = (int)c;
+          string word = (string)ibs_words[code - ibs_word_begin];
           if (code >= ibs_word_begin && code <= ibs_word_end && ibs_words[code - ibs_word_begin] != null)
-            speech += (string)ibs_words[code - ibs_word_begin] + "的" + c.to_string();
+            speech += word;
           else
             speech += c.to_string();
+        
+          if (i > 1 && word.index_of_char((unichar)30340) != word.last_index_of_char((unichar)30340))
+            confuse = true;
         }
         
         ibs_speak_politely(speech);
+        
+        if (i > 3 || confuse)
+          return true; // confuse next word
       }
+
+      return false; // not confuse next word
     }
 
     public void set_candidates(IBus.Text[] candidates,
@@ -121,14 +137,19 @@ class CandidateArea : Gtk.Box {
         ibs_stop();
         if (focus_candidate > 0) {
           // read current candidate
-          read_candidate(focus_candidate + 1, candidates[focus_candidate]);
+          read_candidate(0, candidates[focus_candidate]);
         } else {
           // read candidate list
+          bool confuse = false;
           for (int i = 0; i < candidates.length; i++) {
-            if (candidates.length > 1 && candidates[1].get_length() > 1)
-              read_candidate(i + 1, candidates[i]);
+            bool read_character = true;
+            if (!(candidates.length > 1 && candidates[1].get_length() > 1))
+              read_character = false;
+
+            if (i > 0 && confuse)
+              confuse = read_candidate(i + 1, candidates[i], read_character);
             else
-              read_candidate(i + 1, candidates[i], false);
+              confuse = read_candidate(0, candidates[i], read_character);
           }
         }
 

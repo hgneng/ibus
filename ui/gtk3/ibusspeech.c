@@ -27,7 +27,7 @@ void ibs_speak(char *text) {
 }
 
 void ibs_speak_politely(char *text) {
-  //printf("ibs_speak_politely:%s\n", text);
+//  printf("ibs_speak_politely:%s\n", text);
   spd_say(g_spd, SPD_MESSAGE, text);
 }
 
