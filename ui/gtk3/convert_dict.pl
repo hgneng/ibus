@@ -19,6 +19,7 @@ while (($line = <FILE>)) {
   utf8::decode($word);
   $code = ord($char);
   $chars{$code} = $word;
+  #print "$char: $word\n";
 }
 close(FILE);
 

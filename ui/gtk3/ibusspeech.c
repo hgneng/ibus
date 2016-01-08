@@ -1,5 +1,7 @@
 #include <libspeechd.h>
 #include <stdio.h>
+#include <string.h>
+#include <glib.h>
 
 extern int ibs_word_begin;
 extern int ibs_word_end;
@@ -10,7 +12,8 @@ static char g_result[1024];
 
 void ibs_init() {
   if (!g_spd) {
-    g_spd = spd_open("IBusSpeech", "main", NULL, SPD_MODE_SINGLE);
+    char error_result[1024];
+    g_spd = spd_open2("IBusSpeech", "main", NULL, SPD_MODE_SINGLE, SPD_METHOD_UNIX_SOCKET, 1, &error_result);
     spd_say(g_spd, SPD_TEXT, "i-bus reader 已启动");
   }
 }
@@ -21,14 +24,16 @@ void ibs_destroy() {
 }
 
 void ibs_speak(char *text) {
-  //printf("ibs_speak:%s\n", text);
+  g_message("ibs_speak:%s", text);
   //spd_cancel(g_spd);
-  spd_say(g_spd, SPD_TEXT, text);
+  int ret = spd_say(g_spd, SPD_TEXT, text);
+  g_message("ibs_speak: ret=%d", ret);
 }
 
 void ibs_speak_politely(char *text) {
-//  printf("ibs_speak_politely:%s\n", text);
-  spd_say(g_spd, SPD_MESSAGE, text);
+  g_message("ibs_speak_politely:%s", text);
+  int ret = spd_say(g_spd, SPD_MESSAGE, text);
+  g_message("ibs_speak: ret=%d", ret);
 }
 
 void ibs_stop() {
