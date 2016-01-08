@@ -27,13 +27,13 @@ void ibs_speak(char *text) {
   g_message("ibs_speak:%s", text);
   //spd_cancel(g_spd);
   int ret = spd_say(g_spd, SPD_TEXT, text);
-  g_message("ibs_speak: ret=%d", ret);
+  //g_message("ibs_speak: ret=%d", ret);
 }
 
 void ibs_speak_politely(char *text) {
   g_message("ibs_speak_politely:%s", text);
   int ret = spd_say(g_spd, SPD_MESSAGE, text);
-  g_message("ibs_speak: ret=%d", ret);
+  //g_message("ibs_speak: ret=%d", ret);
 }
 
 void ibs_stop() {
