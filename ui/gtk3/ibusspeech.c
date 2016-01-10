@@ -83,7 +83,7 @@ int ibs_get_orca_rate() {
 }
 
 int ibs_get_config_rate() {
-  ibs_exec("awk -F= '{print $2}' ~/.dog/config/ibusreader");
+  ibs_exec("awk -F= '{print $2}' ~/.dog/config/ibusreader 2>/dev/null");
   if (strlen(g_result) > 0) {
     int rate = atoi(g_result);
     if (rate < 0 || rate > 100)
