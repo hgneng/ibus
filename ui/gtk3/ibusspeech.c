@@ -14,6 +14,7 @@ void ibs_init() {
   if (!g_spd) {
     char error_result[1024];
     g_spd = spd_open2("IBusSpeech", "main", NULL, SPD_MODE_SINGLE, SPD_METHOD_UNIX_SOCKET, 1, &error_result);
+    ibs_update_rate();
     spd_say(g_spd, SPD_TEXT, "i-bus reader 已启动");
   }
 }
@@ -41,7 +42,7 @@ void ibs_stop() {
   spd_cancel(g_spd);
 }
 
-void exec(char *cmd) {
+void ibs_exec(char *cmd) {
   FILE *fp;
 
   /* Open the command for reading. */
@@ -53,18 +54,52 @@ void exec(char *cmd) {
 
   /* Read the output a line at a time - output it. */
   fgets(g_result, sizeof(g_result) - 1, fp);
+  g_message("ibs_exec: %s", g_result);
 
   pclose(fp);
 }
 
-int isProcRunning(char *cmd) {
+int ibs_is_proc_running(char *cmd) {
   char buffer[1024];
   snprintf(buffer, 1023, "ps -ef|grep '%s'|grep -v grep", cmd);
-  exec(buffer);
+  ibs_exec(buffer);
   if (strlen(g_result) > 0)
     return 1;
   else
     return 0;
+}
+
+/* rate in Orac is 0-100, default is 50 */
+int ibs_get_orca_rate() {
+  ibs_exec("grep rate ~/.local/share/orca/user-settings.conf | awk '{print $2}'");
+  if (strlen(g_result) > 0) {
+    int rate = atoi(g_result);
+    if (rate < 0 || rate > 100)
+      rate = 50;
+    return rate;
+  } else {
+    return 50;
+  }
+}
+
+int ibs_get_config_rate() {
+  ibs_exec("awk -F= '{print $2}' ~/.dog/config/ibusreader");
+  if (strlen(g_result) > 0) {
+    int rate = atoi(g_result);
+    if (rate < 0 || rate > 100)
+      rate = -1;
+    return rate;
+  } else {
+    return -1;
+  }
+}
+
+void ibs_update_rate() {
+  int rate = ibs_get_config_rate();
+  if (rate == -1)
+    rate = ibs_get_orca_rate();
+  spd_set_voice_rate(g_spd, (int)((rate - 50) * 2));
+  g_message("ibs_update_rate: %d -> %d", rate, (int)((rate - 50) * 2));
 }
 
 /*
