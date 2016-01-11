@@ -23,6 +23,7 @@
 
 extern int ibs_word_begin;
 extern int ibs_word_end;
+extern int ibs_char_limit;
 extern char* ibs_words[];
 extern void ibs_speak_politely(char *text);
 extern void ibs_stop();
@@ -143,7 +144,7 @@ class CandidateArea : Gtk.Box {
           bool confuse = false;
           for (int i = 0; i < candidates.length; i++) {
             bool read_character = true;
-            if (!(candidates.length > 1 && candidates[1].get_length() > 1))
+            if (candidates[i].get_length() > ibs_char_limit)
               read_character = false;
 
             if (i > 0 && confuse)
