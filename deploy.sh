@@ -21,3 +21,4 @@ im-config -n ibus
 gsettings set org.gnome.desktop.input-sources sources "[('xkb', 'us'), ('ibus', 'pinyin')]"
 ibus-daemon -drx
 ibus restart
+ibus engine pinyin
