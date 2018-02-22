@@ -3,6 +3,7 @@
 /* ibus - The Input Bus
  * Copyright (c) 2009-2014 Google Inc. All rights reserved.
  * Copyright (C) 2010-2014 Peng Huang <shawn.p.huang@gmail.com>
+ * Copyright (C) 2017-2018 Takao Fujiwara <takao.fujiwara1@gmail.com>
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -24,6 +25,10 @@
 #include "ibusmarshalers.h"
 #include "ibusinternal.h"
 
+#define IBUS_PANEL_SERVICE_GET_PRIVATE(o)  \
+   (G_TYPE_INSTANCE_GET_PRIVATE ((o), IBUS_TYPE_PANEL_SERVICE, \
+                                 IBusPanelServicePrivate))
+
 enum {
     UPDATE_PREEDIT_TEXT,
     UPDATE_AUXILIARY_TEXT,
@@ -33,6 +38,7 @@ enum {
     REGISTER_PROPERTIES,
     UPDATE_PROPERTY,
     SET_CURSOR_LOCATION,
+    SET_CURSOR_LOCATION_RELATIVE,
     CURSOR_UP_LOOKUP_TABLE,
     CURSOR_DOWN_LOOKUP_TABLE,
     HIDE_AUXILIARY_TEXT,
@@ -50,6 +56,7 @@ enum {
     STATE_CHANGED,
     DESTROY_CONTEXT,
     SET_CONTENT_TYPE,
+    PANEL_EXTENSION_RECEIVED,
     LAST_SIGNAL,
 };
 
@@ -118,6 +125,12 @@ static void      ibus_panel_service_set_cursor_location
                                     gint                    y,
                                     gint                    w,
                                     gint                    h);
+static void      ibus_panel_service_set_cursor_location_relative
+                                   (IBusPanelService       *panel,
+                                    gint                    x,
+                                    gint                    y,
+                                    gint                    w,
+                                    gint                    h);
 static void      ibus_panel_service_update_auxiliary_text
                                    (IBusPanelService       *panel,
                                     IBusText               *text,
@@ -138,6 +151,9 @@ static void      ibus_panel_service_set_content_type
                                    (IBusPanelService       *panel,
                                     guint                   purpose,
                                     guint                   hints);
+static void      ibus_panel_service_panel_extension_received
+                                   (IBusPanelService       *panel,
+                                    GVariant               *data);
 
 G_DEFINE_TYPE (IBusPanelService, ibus_panel_service, IBUS_TYPE_SERVICE)
 
@@ -189,6 +205,12 @@ static const gchar introspection_xml[] =
     "      <arg direction='in' type='i' name='w' />"
     "      <arg direction='in' type='i' name='h' />"
     "    </method>"
+    "    <method name='SetCursorLocationRelative'>"
+    "      <arg direction='in' type='i' name='x' />"
+    "      <arg direction='in' type='i' name='y' />"
+    "      <arg direction='in' type='i' name='w' />"
+    "      <arg direction='in' type='i' name='h' />"
+    "    </method>"
     "    <method name='Reset' />"
     "    <method name='StartSetup' />"
     "    <method name='StateChanged' />"
@@ -197,6 +219,9 @@ static const gchar introspection_xml[] =
     "    <method name='ContentType'>"
     "      <arg direction='in'  type='u' name='purpose' />"
     "      <arg direction='in'  type='u' name='hints' />"
+    "    </method>"
+    "    <method name='PanelExtensionReceived'>"
+    "      <arg direction='in' type='v' name='data' />"
     "    </method>"
     /* Signals */
     "    <signal name='CursorUp' />"
@@ -217,6 +242,12 @@ static const gchar introspection_xml[] =
     "      <arg type='u' name='index' />"
     "      <arg type='u' name='button' />"
     "      <arg type='u' name='state' />"
+    "    </signal>"
+    "    <signal name='CommitText'>"
+    "      <arg type='v' name='text' />"
+    "    </signal>"
+    "    <signal name='PanelExtension'>"
+    "      <arg type='v' name='data' />"
     "    </signal>"
     "  </interface>"
     "</node>";
@@ -251,11 +282,14 @@ ibus_panel_service_class_init (IBusPanelServiceClass *class)
     class->destroy_context       = ibus_panel_service_destroy_context;
     class->register_properties   = ibus_panel_service_register_properties;
     class->set_cursor_location   = ibus_panel_service_set_cursor_location;
+    class->set_cursor_location_relative = ibus_panel_service_set_cursor_location_relative;
     class->update_lookup_table   = ibus_panel_service_update_lookup_table;
     class->update_auxiliary_text = ibus_panel_service_update_auxiliary_text;
     class->update_preedit_text   = ibus_panel_service_update_preedit_text;
     class->update_property       = ibus_panel_service_update_property;
     class->set_content_type      = ibus_panel_service_set_content_type;
+    class->panel_extension_received =
+            ibus_panel_service_panel_extension_received;
 
     class->cursor_down_lookup_table = ibus_panel_service_not_implemented;
     class->cursor_up_lookup_table   = ibus_panel_service_not_implemented;
@@ -471,6 +505,35 @@ ibus_panel_service_class_init (IBusPanelServiceClass *class)
             G_TYPE_FROM_CLASS (gobject_class),
             G_SIGNAL_RUN_LAST,
             G_STRUCT_OFFSET (IBusPanelServiceClass, set_cursor_location),
+            NULL, NULL,
+            _ibus_marshal_VOID__INT_INT_INT_INT,
+            G_TYPE_NONE,
+            4,
+            G_TYPE_INT,
+            G_TYPE_INT,
+            G_TYPE_INT,
+            G_TYPE_INT);
+
+    /**
+     * IBusPanelService::set-cursor-location-relative:
+     * @panel: An #IBusPanelService
+     * @x: X coordinate of the cursor.
+     * @y: Y coordinate of the cursor.
+     * @w: Width of the cursor.
+     * @h: Height of the cursor.
+     *
+     * Emitted when the client application get the set-cursor-location-relative.
+     * Implement the member function set_cursor_location_relative() in
+     * extended class to receive this signal.
+     *
+     * <note><para>Argument @user_data is ignored in this function.</para>
+     * </note>
+     */
+    panel_signals[SET_CURSOR_LOCATION_RELATIVE] =
+        g_signal_new (I_("set-cursor-location-relative"),
+            G_TYPE_FROM_CLASS (gobject_class),
+            G_SIGNAL_RUN_LAST,
+            G_STRUCT_OFFSET (IBusPanelServiceClass, set_cursor_location_relative),
             NULL, NULL,
             _ibus_marshal_VOID__INT_INT_INT_INT,
             G_TYPE_NONE,
@@ -844,6 +907,30 @@ ibus_panel_service_class_init (IBusPanelServiceClass *class)
             2,
             G_TYPE_UINT,
             G_TYPE_UINT);
+
+    /**
+     * IBusPanelService::panel-extension-received:
+     * @panel: An #IBusPanelService
+     * @data: A #GVariant
+     *
+     * Emitted when the client application get the ::panel-extension-received.
+     * Implement the member function
+     * IBusPanelServiceClass::panel_extension_received in extended class to
+     * receive this signal.
+     *
+     * <note><para>Argument @user_data is ignored in this function.</para>
+     * </note>
+     */
+    panel_signals[PANEL_EXTENSION_RECEIVED] =
+        g_signal_new (I_("panel-extension-received"),
+            G_TYPE_FROM_CLASS (gobject_class),
+            G_SIGNAL_RUN_LAST,
+            G_STRUCT_OFFSET (IBusPanelServiceClass, panel_extension_received),
+            NULL, NULL,
+            _ibus_marshal_VOID__VARIANT,
+            G_TYPE_NONE,
+            1,
+            G_TYPE_VARIANT);
 }
 
 static void
@@ -889,6 +976,15 @@ _g_object_unref_if_floating (gpointer instance)
         g_object_unref (instance);
 }
 
+static gboolean
+ibus_panel_service_service_authorized_method (IBusService     *service,
+                                              GDBusConnection *connection)
+{
+    if (ibus_service_get_connection (service) == connection)
+        return TRUE;
+    return FALSE;
+}
+
 static void
 ibus_panel_service_service_method_call (IBusService           *service,
                                         GDBusConnection       *connection,
@@ -913,6 +1009,9 @@ ibus_panel_service_service_method_call (IBusService           *service,
                                      invocation);
         return;
     }
+
+    if (!ibus_panel_service_service_authorized_method (service, connection))
+        return;
 
     if (g_strcmp0 (method_name, "UpdatePreeditText") == 0) {
         GVariant *variant = NULL;
@@ -1011,11 +1110,38 @@ ibus_panel_service_service_method_call (IBusService           *service,
         return;
     }
 
+    if (g_strcmp0 (method_name, "SetCursorLocationRelative") == 0) {
+        gint x, y, w, h;
+        g_variant_get (parameters, "(iiii)", &x, &y, &w, &h);
+        g_signal_emit (panel, panel_signals[SET_CURSOR_LOCATION_RELATIVE],
+                       0, x, y, w, h);
+        g_dbus_method_invocation_return_value (invocation, NULL);
+        return;
+    }
+
     if (g_strcmp0 (method_name, "ContentType") == 0) {
         guint purpose, hints;
         g_variant_get (parameters, "(uu)", &purpose, &hints);
         g_signal_emit (panel, panel_signals[SET_CONTENT_TYPE], 0,
                        purpose, hints);
+        g_dbus_method_invocation_return_value (invocation, NULL);
+        return;
+    }
+
+    if (g_strcmp0 (method_name, "PanelExtensionReceived") == 0) {
+        GVariant *variant = NULL;
+        g_variant_get (parameters, "(v)", &variant);
+        if (variant == NULL) {
+            g_dbus_method_invocation_return_error (
+                    invocation,
+                    G_DBUS_ERROR,
+                    G_DBUS_ERROR_FAILED,
+                    "PanelExtensionReceived method gives NULL");
+            return;
+        }
+        g_signal_emit (panel, panel_signals[PANEL_EXTENSION_RECEIVED], 0,
+                       variant);
+        g_variant_unref (variant);
         g_dbus_method_invocation_return_value (invocation, NULL);
         return;
     }
@@ -1142,6 +1268,16 @@ ibus_panel_service_set_cursor_location (IBusPanelService *panel,
 }
 
 static void
+ibus_panel_service_set_cursor_location_relative (IBusPanelService *panel,
+                                                 gint              x,
+                                                 gint              y,
+                                                 gint              w,
+                                                 gint              h)
+{
+    ibus_panel_service_not_implemented(panel);
+}
+
+static void
 ibus_panel_service_update_auxiliary_text (IBusPanelService *panel,
                                           IBusText         *text,
                                           gboolean          visible)
@@ -1177,6 +1313,13 @@ static void
 ibus_panel_service_set_content_type (IBusPanelService *panel,
                                      guint             purpose,
                                      guint             hints)
+{
+    ibus_panel_service_not_implemented(panel);
+}
+
+static void
+ibus_panel_service_panel_extension_received (IBusPanelService *panel,
+                                             GVariant         *data)
 {
     ibus_panel_service_not_implemented(panel);
 }
@@ -1249,6 +1392,41 @@ ibus_panel_service_property_hide (IBusPanelService *panel,
                               NULL);
 }
 
+void
+ibus_panel_service_commit_text (IBusPanelService *panel,
+                                IBusText         *text)
+{
+    g_return_if_fail (IBUS_IS_PANEL_SERVICE (panel));
+    g_return_if_fail (IBUS_IS_TEXT (text));
+
+    GVariant *variant = ibus_serializable_serialize ((IBusSerializable *)text);
+    ibus_service_emit_signal ((IBusService *) panel,
+                              NULL,
+                              IBUS_INTERFACE_PANEL,
+                              "CommitText",
+                              g_variant_new ("(v)", variant),
+                              NULL);
+
+    if (g_object_is_floating (text)) {
+        g_object_unref (text);
+    }
+}
+
+void
+ibus_panel_service_panel_extension (IBusPanelService *panel,
+                                    GVariant         *variant)
+{
+    g_return_if_fail (IBUS_IS_PANEL_SERVICE (panel));
+    g_return_if_fail (variant);
+
+    ibus_service_emit_signal ((IBusService *) panel,
+                              NULL,
+                              IBUS_INTERFACE_PANEL,
+                              "PanelExtension",
+                              g_variant_new ("(v)", variant),
+                              NULL);
+}
+
 #define DEFINE_FUNC(name, Name)                             \
     void                                                    \
     ibus_panel_service_##name (IBusPanelService *panel)     \
@@ -1266,4 +1444,3 @@ DEFINE_FUNC (cursor_up, CursorUp)
 DEFINE_FUNC (page_down, PageDown)
 DEFINE_FUNC (page_up, PageUp)
 #undef DEFINE_FUNC
-

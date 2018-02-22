@@ -3,7 +3,7 @@
  * ibus - The Input Bus
  *
  * Copyright(c) 2011-2014 Peng Huang <shawn.p.huang@gmail.com>
- * Copyright(c) 2015 Takao Fujwiara <takao.fujiwara1@gmail.com>
+ * Copyright(c) 2015-2018 Takao Fujwiara <takao.fujiwara1@gmail.com>
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -22,19 +22,6 @@
  */
 
 class Panel : IBus.PanelService {
-    private class Keybinding {
-        public Keybinding(uint keysym,
-                          Gdk.ModifierType modifiers,
-                          bool reverse) {
-            this.keysym = keysym;
-            this.modifiers = modifiers;
-            this.reverse = reverse;
-        }
-
-        public uint keysym { get; set; }
-        public Gdk.ModifierType modifiers { get; set; }
-        public bool reverse { get; set; }
-    }
 
     private enum IconType {
         STATUS_ICON,
@@ -58,10 +45,11 @@ class Panel : IBus.PanelService {
             new GLib.HashTable<string, IBus.EngineDesc>(GLib.str_hash,
                                                         GLib.str_equal);
     private string m_current_context_path = "";
+    private string m_real_current_context_path = "";
     private bool m_use_global_engine = true;
     private CandidatePanel m_candidate_panel;
     private Switcher m_switcher;
-    private bool m_switcher_is_running = false;
+    private uint m_switcher_focus_set_engine_id;
     private PropertyManager m_property_manager;
     private PropertyPanel m_property_panel;
     private GLib.Pid m_setup_pid = 0;
@@ -84,8 +72,17 @@ class Panel : IBus.PanelService {
     private string m_icon_prop_key = "";
     private int m_property_icon_delay_time = 500;
     private uint m_property_icon_delay_time_id;
+#if INDICATOR
+    private bool m_is_kde = is_kde();
+#else
+    private bool m_is_kde = false;
+#endif
+    private ulong m_popup_menu_id;
+    private ulong m_activate_id;
+    private ulong m_registered_status_notifier_item_id;
 
-    private GLib.List<Keybinding> m_keybindings = new GLib.List<Keybinding>();
+    private GLib.List<BindingCommon.Keybinding> m_keybindings =
+            new GLib.List<BindingCommon.Keybinding>();
 
     public Panel(IBus.Bus bus) {
         GLib.assert(bus.is_connected());
@@ -99,7 +96,7 @@ class Panel : IBus.PanelService {
 
         // init ui
 #if INDICATOR
-        if (is_kde()) {
+        if (m_is_kde) {
             init_indicator();
         } else {
             init_status_icon();
@@ -111,6 +108,8 @@ class Panel : IBus.PanelService {
         m_candidate_panel = new CandidatePanel();
         m_candidate_panel.page_up.connect((w) => this.page_up());
         m_candidate_panel.page_down.connect((w) => this.page_down());
+        m_candidate_panel.cursor_up.connect((w) => this.cursor_up());
+        m_candidate_panel.cursor_down.connect((w) => this.cursor_down());
         m_candidate_panel.candidate_clicked.connect(
                 (w, i, b, s) => this.candidate_clicked(i, b, s));
 
@@ -136,7 +135,14 @@ class Panel : IBus.PanelService {
     }
 
     ~Panel() {
-        unbind_switch_shortcut();
+#if INDICATOR
+        // unref m_indicator
+        if (m_indicator != null)
+            m_indicator.unregister_connection();
+#endif
+        BindingCommon.unbind_switch_shortcut(
+                BindingCommon.KeyEventFuncType.ANY, m_keybindings);
+        m_keybindings = null;
     }
 
     private void init_settings() {
@@ -172,16 +178,23 @@ class Panel : IBus.PanelService {
         });
 
         m_settings_hotkey.changed["triggers"].connect((key) => {
-                unbind_switch_shortcut();
+                BindingCommon.unbind_switch_shortcut(
+                        BindingCommon.KeyEventFuncType.IME_SWITCHER,
+                        m_keybindings);
+                m_keybindings = null;
                 bind_switch_shortcut();
         });
 
         m_settings_panel.changed["custom-font"].connect((key) => {
-                set_custom_font();
+                BindingCommon.set_custom_font(m_settings_panel,
+                                              null,
+                                              ref m_css_provider);
         });
 
         m_settings_panel.changed["use-custom-font"].connect((key) => {
-                set_custom_font();
+                BindingCommon.set_custom_font(m_settings_panel,
+                                              null,
+                                              ref m_css_provider);
         });
 
         m_settings_panel.changed["show-icon-on-systray"].connect((key) => {
@@ -214,13 +227,47 @@ class Panel : IBus.PanelService {
         });
     }
 
+    private void popup_menu_at_area_window(Gtk.Menu              menu,
+                                           Gdk.Rectangle         area,
+                                           Gdk.Window?           window,
+                                           Gtk.MenuPositionFunc? func) {
+#if VALA_0_34
+        Gdk.Gravity rect_anchor = Gdk.Gravity.SOUTH_WEST;
+        Gdk.Gravity menu_anchor = Gdk.Gravity.NORTH_WEST;
+
+        // Gtk.Menu.popup() is now deprecated but
+        // Gtk.Menu.popup_at_rect() requires a Gdk.Window and
+        // Gtk.Menu.popup_at_rect() outputs a warning of
+        // "no trigger event for menu popup"
+        // for the foreigner QT window which is generated by
+        // Gdk.X11.Window.foreign_for_display.
+        // https://git.gnome.org/browse/gtk+/tree/gtk/gtkmenu.c?h=gtk-3-22#n2251
+        menu.popup_at_rect(window, area, rect_anchor, menu_anchor, null);
+#else
+        menu.popup(null, null, func, 0, Gtk.get_current_event_time());
+#endif
+    }
+
 #if INDICATOR
-    private bool is_kde() {
+    private static bool is_kde() {
         if (Environment.get_variable("XDG_CURRENT_DESKTOP") == "KDE")
             return true;
         warning ("If you launch KDE5 on xterm, " +
                  "export XDG_CURRENT_DESKTOP=KDE before launch KDE5.");
         return false;
+    }
+
+    private void popup_menu_at_pointer_window(Gtk.Menu              menu,
+                                              int                   x,
+                                              int                   y,
+                                              Gdk.Window?           window,
+                                              Gtk.MenuPositionFunc? func) {
+        int win_x = 0;
+        int win_y = 0;
+        window.get_origin(out win_x, out win_y);
+        Gdk.Rectangle area = { x - win_x, y - win_y, 1, 1 };
+        // window is a bottom wide panel instead of status icon
+        popup_menu_at_area_window(menu, area, window, func);
     }
 
     private void init_indicator() {
@@ -233,25 +280,25 @@ class Panel : IBus.PanelService {
                                       m_session_bus_connection,
                                       Indicator.Category.APPLICATION_STATUS);
                 m_indicator.title = _("IBus Panel");
-                m_indicator.registered_status_notifier_item.connect(() => {
+                m_registered_status_notifier_item_id =
+                        m_indicator.registered_status_notifier_item.connect(
+                                () => {
                     m_indicator.set_status(Indicator.Status.ACTIVE);
                     state_changed();
                 });
-                m_indicator.context_menu.connect((b, t) => {
-                    Gtk.Menu menu = create_context_menu();
-                    menu.popup(null,
-                               null,
-                               m_indicator.position_context_menu,
-                               0,
-                               Gtk.get_current_event_time());
+                m_popup_menu_id =
+                        m_indicator.context_menu.connect((x, y, w, b, t) => {
+                    popup_menu_at_pointer_window(
+                        create_context_menu(),
+                        x, y, w,
+                        m_indicator.position_context_menu);
                 });
-                m_indicator.activate.connect(() => {
-                    Gtk.Menu menu = create_activate_menu();
-                    menu.popup(null,
-                               null,
-                               m_indicator.position_activate_menu,
-                               0,
-                               Gtk.get_current_event_time());
+                m_activate_id =
+                        m_indicator.activate.connect((x, y, w) => {
+                    popup_menu_at_pointer_window(
+                            create_activate_menu(),
+                            x, y, w,
+                            m_indicator.position_activate_menu);
                 });
             } catch (GLib.IOError e) {
                 warning("Failed to get the session bus: %s", e.message);
@@ -264,82 +311,49 @@ class Panel : IBus.PanelService {
         m_status_icon = new Gtk.StatusIcon();
         m_status_icon.set_name("ibus-ui-gtk");
         m_status_icon.set_title(_("IBus Panel"));
-        m_status_icon.popup_menu.connect((b, t) => {
-                Gtk.Menu menu = create_context_menu();
-                menu.popup(null,
-                           null,
-                           m_status_icon.position_menu,
-                           0,
-                           Gtk.get_current_event_time());
-        });
-        m_status_icon.activate.connect(() => {
-                Gtk.Menu menu = create_activate_menu();
-                menu.popup(null,
-                           null,
-                           m_status_icon.position_menu,
-                           0,
-                           Gtk.get_current_event_time());
-        });
-        m_status_icon.set_from_icon_name("ibus-keyboard");
+
+        // Gdk.Window.get_width() is needed for the menu position
+        if (m_status_icon.get_size() > 0)
+            init_status_icon_menu();
+        else
+            m_status_icon.notify["size"].connect(init_status_icon_menu);
     }
 
-    private void keybinding_manager_bind(KeybindingManager keybinding_manager,
-                                         string?           accelerator) {
-        uint switch_keysym = 0;
-        Gdk.ModifierType switch_modifiers = 0;
-        Gdk.ModifierType reverse_modifier = Gdk.ModifierType.SHIFT_MASK;
-        Keybinding keybinding;
-
-        Gtk.accelerator_parse(accelerator,
-                out switch_keysym, out switch_modifiers);
-
-        // Map virtual modifiers to (i.e. Mod2, Mod3, ...)
-        const Gdk.ModifierType VIRTUAL_MODIFIERS = (
-                Gdk.ModifierType.SUPER_MASK |
-                Gdk.ModifierType.HYPER_MASK |
-                Gdk.ModifierType.META_MASK);
-        if ((switch_modifiers & VIRTUAL_MODIFIERS) != 0) {
-        // workaround a bug in gdk vapi vala > 0.18
-        // https://bugzilla.gnome.org/show_bug.cgi?id=677559
-#if VALA_0_18
-            Gdk.Keymap.get_default().map_virtual_modifiers(
-                    ref switch_modifiers);
+    private void init_status_icon_menu() {
+        Gdk.Rectangle area = { 0, 0, 0, 0 };
+        Gdk.Window? window = null;
+        Gtk.MenuPositionFunc? func = null;
+#if VALA_0_34
+        window = Gdk.X11.Window.lookup_for_display(
+                Gdk.Display.get_default() as Gdk.X11.Display,
+                m_status_icon.get_x11_window_id()) as Gdk.Window;
+        if (window == null) {
+            warning("StatusIcon does not have GdkWindow");
+            return;
+        }
+        Gtk.Orientation orient;
+        m_status_icon.get_geometry(null, out area, out orient);
+        int win_x = 0;
+        int win_y = 0;
+        window.get_origin(out win_x, out win_y);
+        // The (x, y) is converted by gdk_window_get_root_coords()
+        // in gdk_window_impl_move_to_rect()
+        area.x -= win_x;
+        area.y -= win_y;
 #else
-            if ((switch_modifiers & Gdk.ModifierType.SUPER_MASK) != 0)
-                switch_modifiers |= Gdk.ModifierType.MOD4_MASK;
-            if ((switch_modifiers & Gdk.ModifierType.HYPER_MASK) != 0)
-                switch_modifiers |= Gdk.ModifierType.MOD4_MASK;
+        func = m_status_icon.position_menu;
 #endif
-            switch_modifiers &= ~VIRTUAL_MODIFIERS;
-        }
-
-        if (switch_keysym == 0 && switch_modifiers == 0) {
-            warning("Parse accelerator '%s' failed!", accelerator);
-            return;
-        }
-
-        keybinding = new Keybinding(switch_keysym,
-                                    switch_modifiers,
-                                    false);
-        m_keybindings.append(keybinding);
-
-        keybinding_manager.bind(switch_keysym, switch_modifiers,
-                (e) => handle_engine_switch(e, false));
-
-        // accelerator already has Shift mask
-        if ((switch_modifiers & reverse_modifier) != 0) {
-            return;
-        }
-
-        switch_modifiers |= reverse_modifier;
-
-        keybinding = new Keybinding(switch_keysym,
-                                    switch_modifiers,
-                                    true);
-        m_keybindings.append(keybinding);
-
-        keybinding_manager.bind(switch_keysym, switch_modifiers,
-                (e) => handle_engine_switch(e, true));
+        m_popup_menu_id = m_status_icon.popup_menu.connect((b, t) => {
+                popup_menu_at_area_window(
+                        create_context_menu(),
+                        area, window, func);
+        });
+        m_activate_id = m_status_icon.activate.connect(() => {
+                popup_menu_at_area_window(
+                        create_activate_menu(),
+                        area, window, func);
+        });
+        m_status_icon.set_from_icon_name("ibus-keyboard");
     }
 
     private void bind_switch_shortcut() {
@@ -348,25 +362,34 @@ class Panel : IBus.PanelService {
         var keybinding_manager = KeybindingManager.get_instance();
 
         foreach (var accelerator in accelerators) {
-            keybinding_manager_bind(keybinding_manager, accelerator);
+            BindingCommon.keybinding_manager_bind(
+                    keybinding_manager,
+                    ref m_keybindings,
+                    accelerator,
+                    BindingCommon.KeyEventFuncType.IME_SWITCHER,
+                    handle_engine_switch_normal,
+                    handle_engine_switch_reverse);
         }
     }
 
-    private void unbind_switch_shortcut() {
+/*
+    public static void
+    unbind_switch_shortcut(KeyEventFuncType      ftype,
+                           GLib.List<Keybinding> keybindings) {
         var keybinding_manager = KeybindingManager.get_instance();
-
-        unowned GLib.List<Keybinding> keybindings = m_keybindings;
 
         while (keybindings != null) {
             Keybinding keybinding = keybindings.data;
 
-            keybinding_manager.unbind(keybinding.keysym,
-                                      keybinding.modifiers);
+            if (ftype == KeyEventFuncType.ANY ||
+                ftype == keybinding.ftype) {
+                keybinding_manager.unbind(keybinding.keysym,
+                                          keybinding.modifiers);
+            }
             keybindings = keybindings.next;
         }
-
-        m_keybindings = null;
     }
+*/
 
     /**
      * panel_get_engines_from_xkb:
@@ -514,51 +537,6 @@ class Panel : IBus.PanelService {
         m_settings_general.set_strv("preload-engines", names);
     }
 
-    private void set_custom_font() {
-        Gdk.Display display = Gdk.Display.get_default();
-        Gdk.Screen screen = (display != null) ?
-                display.get_default_screen() : null;
-
-        if (screen == null) {
-            warning("Could not open display.");
-            return;
-        }
-
-        bool use_custom_font = m_settings_panel.get_boolean("use-custom-font");
-
-        if (m_css_provider != null) {
-            Gtk.StyleContext.remove_provider_for_screen(screen,
-                                                        m_css_provider);
-            m_css_provider = null;
-        }
-
-        if (use_custom_font == false) {
-            return;
-        }
-
-        string font_name = m_settings_panel.get_string("custom-font");
-
-        if (font_name == null) {
-            warning("No config panel:custom-font.");
-            return;
-        }
-
-        string data_format = "GtkLabel { font: %s; }";
-        string data = data_format.printf(font_name);
-        m_css_provider = new Gtk.CssProvider();
-
-        try {
-            m_css_provider.load_from_data(data, -1);
-        } catch (GLib.Error e) {
-            warning("Failed css_provider_from_data: %s: %s", font_name,
-                                                             e.message);
-            return;
-        }
-
-        Gtk.StyleContext.add_provider_for_screen(screen,
-                                                 m_css_provider,
-                                                 Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION);
-    }
 
     private void set_switcher_delay_time() {
         m_switcher_delay_time =
@@ -682,6 +660,7 @@ class Panel : IBus.PanelService {
                 m_settings_panel.get_int("property-icon-delay-time");
     }
 
+
     private int compare_versions(string version1, string version2) {
         string[] version1_list = version1.split(".");
         string[] version2_list = version2.split(".");
@@ -782,11 +761,16 @@ class Panel : IBus.PanelService {
         set_use_xmodmap();
         update_engines(m_settings_general.get_strv("preload-engines"),
                        m_settings_general.get_strv("engines-order"));
-        unbind_switch_shortcut();
+        BindingCommon.unbind_switch_shortcut(
+                BindingCommon.KeyEventFuncType.ANY,
+                m_keybindings);
+        m_keybindings = null;
         bind_switch_shortcut();
         set_switcher_delay_time();
         set_embed_preedit_text();
-        set_custom_font();
+        BindingCommon.set_custom_font(m_settings_panel,
+                                      null,
+                                      ref m_css_provider);
         set_show_icon_on_systray();
         set_lookup_table_orientation();
         set_show_property_panel();
@@ -794,6 +778,42 @@ class Panel : IBus.PanelService {
         set_follow_input_cursor_when_always_shown_property_panel();
         set_xkb_icon_rgba();
         set_property_icon_delay_time();
+    }
+
+    /**
+     * disconnect_signals:
+     *
+     * Call this API before m_panel = null so that the ref_count becomes 0
+     */
+    public void disconnect_signals() {
+        unowned GLib.Object object = m_status_icon;
+#if INDICATOR
+        if (m_is_kde)
+            object = m_indicator;
+#endif
+        if (m_popup_menu_id > 0) {
+            // No name functions refer m_panel in m_status_icon
+            if (GLib.SignalHandler.is_connected(object, m_popup_menu_id))
+                object.disconnect(m_popup_menu_id);
+            m_popup_menu_id = 0;
+        }
+        if (m_activate_id > 0) {
+            if (GLib.SignalHandler.is_connected(object, m_activate_id))
+                object.disconnect(m_activate_id);
+            m_activate_id = 0;
+        }
+        if (m_registered_status_notifier_item_id > 0) {
+            if (GLib.SignalHandler.is_connected(
+                    object,
+                    m_registered_status_notifier_item_id)) {
+                object.disconnect(m_registered_status_notifier_item_id);
+            }
+            m_registered_status_notifier_item_id = 0;
+        }
+        if (m_preload_engines_id > 0) {
+            GLib.Source.remove(m_preload_engines_id);
+            m_preload_engines_id = 0;
+        }
     }
 
     private void engine_contexts_insert(IBus.EngineDesc engine) {
@@ -810,21 +830,27 @@ class Panel : IBus.PanelService {
 
     private void set_engine(IBus.EngineDesc engine) {
         debug("[hgneng] set_engine: %s", engine.get_name());
+        if (m_property_icon_delay_time_id > 0) {
+            GLib.Source.remove(m_property_icon_delay_time_id);
+            m_property_icon_delay_time_id = 0;
+        }
+
         if (!m_bus.set_global_engine(engine.get_name())) {
             warning("Switch engine to %s failed.", engine.get_name());
             return;
         }
+        /* Panel.update_property() will be called with a time lag
+         * by another engine because of DBus delay so need to
+         * clear m_icon_prop_key here to avoid wrong panel icon in
+         * disabled m_use_global_engine.
+         */
+        m_icon_prop_key = "";
 
         // set xkb layout
         if (!m_use_system_keyboard_layout)
             m_xkblayout.set_layout(engine);
 
         engine_contexts_insert(engine);
-
-        if (m_property_icon_delay_time_id > 0) {
-            GLib.Source.remove(m_property_icon_delay_time_id);
-            m_property_icon_delay_time_id = 0;
-        }
     }
 
     private void switch_engine(int i, bool force = false) {
@@ -839,7 +865,15 @@ class Panel : IBus.PanelService {
         set_engine(engine);
     }
 
-    private void handle_engine_switch(Gdk.Event event, bool revert) {
+    private void handle_engine_switch_normal(Gdk.Event event) {
+        handle_engine_switch(event, false);
+    }
+
+    private void handle_engine_switch_reverse(Gdk.Event event) {
+        handle_engine_switch(event, true);
+    }
+
+    private void handle_engine_switch(Gdk.Event event, bool reverse) {
         // Do not need switch IME
         if (m_engines.length <= 1)
             return;
@@ -853,37 +887,38 @@ class Panel : IBus.PanelService {
         bool pressed = KeybindingManager.primary_modifier_still_pressed(
                 event, primary_modifiers);
 
-        if (revert) {
+        if (reverse) {
             modifiers &= ~Gdk.ModifierType.SHIFT_MASK;
         }
 
         if (pressed && m_switcher_delay_time >= 0) {
-            int i = revert ? m_engines.length - 1 : 1;
+            int i = reverse ? m_engines.length - 1 : 1;
 
-            /* The flag of m_switcher_is_running avoids the following problem:
+            /* The flag of m_switcher.is_running avoids the following problem:
              *
              * When an IME is chosen on m_switcher, focus_in() is called
-             * for the root window. If an engine is set in focus_in()
+             * for the fake input context. If an engine is set in focus_in()
              * during running m_switcher when m_use_global_engine is false,
              * state_changed() is also called and m_engines[] is modified
              * in state_changed() and m_switcher.run() returns the index
              * for m_engines[] but m_engines[] was modified by state_changed()
              * and the index is not correct. */
-            m_switcher_is_running = true;
-            i = m_switcher.run(keyval, modifiers, event, m_engines, i);
-            m_switcher_is_running = false;
+            i = m_switcher.run(keyval, modifiers, event, m_engines, i,
+                               m_real_current_context_path);
 
             if (i < 0) {
                 debug("switch cancelled");
+            } else if (i == 0) {
+                debug("do not have to switch");
             } else {
-                GLib.assert(i < m_engines.length);
-                switch_engine(i);
+                this.switcher_focus_set_engine();
             }
         } else {
-            int i = revert ? m_engines.length - 1 : 1;
+            int i = reverse ? m_engines.length - 1 : 1;
             switch_engine(i);
         }
     }
+
 
     private void run_preload_engines(IBus.EngineDesc[] engines, int index) {
         string[] names = {};
@@ -1112,6 +1147,33 @@ class Panel : IBus.PanelService {
             item.activate.connect((i) => show_setup_dialog());
             m_sys_menu.append(item);
 
+#if EMOJI_DICT
+            item = new Gtk.MenuItem.with_label(_("Emoji Choice"));
+            item.activate.connect((i) => {
+                Gdk.Event event = Gtk.get_current_event();
+                if (event == null) {
+                    event = new Gdk.Event(Gdk.EventType.KEY_PRESS);
+                    event.key.time = Gdk.CURRENT_TIME;
+                    // event.get_seat() refers event.any.window
+                    event.key.window = Gdk.get_default_root_window();
+                    event.key.window.ref();
+                }
+                IBus.XEvent xevent = new IBus.XEvent(
+                        "event-type", IBus.XEventType.KEY_PRESS,
+                        "window",
+                        (event.key.window as Gdk.X11.Window).get_xid(),
+                        "time", event.key.time,
+                        "purpose", "emoji");
+                /* new GLib.Variant("(sv)", "emoji", xevent.serialize_object())
+                 * will call g_variant_unref() for the child variant by vala.
+                 * I have no idea not to unref the object so integrated
+                 * the purpose to IBus.XEvent above.
+                 */
+                panel_extension(xevent.serialize_object());
+            });
+            m_sys_menu.append(item);
+#endif
+
             item = new Gtk.MenuItem.with_label(_("About"));
             item.activate.connect((i) => show_about_dialog());
             m_sys_menu.append(item);
@@ -1144,8 +1206,10 @@ class Panel : IBus.PanelService {
         foreach (var engine in m_engines) {
             var language = engine.get_language();
             var longname = engine.get_longname();
+            var textdomain = engine.get_textdomain();
+            var transname = GLib.dgettext(textdomain, longname);
             var item = new Gtk.MenuItem.with_label(
-                "%s - %s".printf (IBus.get_language_name(language), longname));
+                "%s - %s".printf (IBus.get_language_name(language), transname));
             // Make a copy of engine to workaround a bug in vala.
             // https://bugzilla.gnome.org/show_bug.cgi?id=628336
             var e = engine;
@@ -1225,19 +1289,71 @@ class Panel : IBus.PanelService {
         m_property_panel.set_cursor_location(x, y, width, height);
     }
 
+    private bool switcher_focus_set_engine_real() {
+        IBus.EngineDesc? selected_engine = m_switcher.get_selected_engine();
+        string prev_context_path = m_switcher.get_input_context_path();
+        if (selected_engine != null &&
+            prev_context_path != "" &&
+            prev_context_path == m_current_context_path) {
+            set_engine(selected_engine);
+            m_switcher.reset();
+            return true;
+        }
+
+        return false;
+    }
+
+    private void switcher_focus_set_engine() {
+        IBus.EngineDesc? selected_engine = m_switcher.get_selected_engine();
+        string prev_context_path = m_switcher.get_input_context_path();
+        if (selected_engine == null &&
+            prev_context_path != "" &&
+            m_switcher.is_running()) {
+            var context = GLib.MainContext.default();
+            if (m_switcher_focus_set_engine_id > 0 &&
+                context.find_source_by_id(m_switcher_focus_set_engine_id)
+                        != null) {
+                GLib.Source.remove(m_switcher_focus_set_engine_id);
+            }
+            m_switcher_focus_set_engine_id = GLib.Timeout.add(100, () => {
+                // focus_in is comming before switcher returns
+                switcher_focus_set_engine_real();
+                m_switcher_focus_set_engine_id = -1;
+                return false;
+            });
+        } else {
+            if (switcher_focus_set_engine_real()) {
+                var context = GLib.MainContext.default();
+                if (m_switcher_focus_set_engine_id > 0 &&
+                    context.find_source_by_id(m_switcher_focus_set_engine_id)
+                            != null) {
+                    GLib.Source.remove(m_switcher_focus_set_engine_id);
+                }
+                m_switcher_focus_set_engine_id = -1;
+            }
+        }
+    }
+
     public override void focus_in(string input_context_path) {
-        m_property_panel.focus_in();
+        m_current_context_path = input_context_path;
+
+        /* 'fake' input context is named as 
+         * '/org/freedesktop/IBus/InputContext_1' and always send in
+         * focus-out events by ibus-daemon for the global engine mode.
+         * Now ibus-daemon assumes to always use the global engine.
+         * But this event should not be used for modal dialogs
+         * such as Switcher.
+         */
+        if (!input_context_path.has_suffix("InputContext_1")) {
+            m_real_current_context_path = m_current_context_path;
+            m_property_panel.focus_in();
+            this.switcher_focus_set_engine();
+        }
 
         if (m_use_global_engine)
             return;
 
-        /* Do not change the order of m_engines during running switcher. */
-        if (m_switcher_is_running)
-            return;
-
-        m_current_context_path = input_context_path;
-
-        var engine = m_engine_contexts[m_current_context_path];
+        var engine = m_engine_contexts[input_context_path];
 
         if (engine == null) {
             /* If engine == null, need to call set_engine(m_engines[0])
@@ -1275,13 +1391,6 @@ class Panel : IBus.PanelService {
     }
 
     public override void focus_out(string input_context_path) {
-        if (m_use_global_engine)
-            return;
-
-        /* Do not change the order of m_engines during running switcher. */
-        if (m_switcher_is_running)
-            return;
-
         m_current_context_path = "";
     }
 
@@ -1346,7 +1455,7 @@ class Panel : IBus.PanelService {
 
     public override void state_changed() {
         /* Do not change the order of m_engines during running switcher. */
-        if (m_switcher_is_running)
+        if (m_switcher.is_running())
             return;
 
         if (m_icon_type == IconType.INDICATOR) {

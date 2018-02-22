@@ -2,8 +2,9 @@
 #
 # ibus - The Input Bus
 #
-# Copyright (c) 2007-2015 Peng Huang <shawn.p.huang@gmail.com>
-# Copyright (c) 2007-2015 Red Hat, Inc.
+# Copyright (c) 2007-2016 Peng Huang <shawn.p.huang@gmail.com>
+# Copyright (c) 2015-2018 Takao Fujiwara <takao.fujiwara1@gmail.com>
+# Copyright (c) 2007-2018 Red Hat, Inc.
 #
 # This library is free software; you can redistribute it and/or
 # modify it under the terms of the GNU Lesser General Public
@@ -26,7 +27,7 @@ m4_define([ibus_released], [1])
 
 m4_define([ibus_major_version], [1])
 m4_define([ibus_minor_version], [5])
-m4_define([ibus_micro_version], [11])
+m4_define([ibus_micro_version], [17])
 m4_define([ibus_abi_current], [5])
 m4_define([ibus_abi_revision],
           [m4_eval(100 * ibus_minor_version + ibus_micro_version)])
@@ -152,7 +153,7 @@ PKG_CHECK_MODULES(GOBJECT2, [
     gobject-2.0 >= glib_required_version
 ])
 PKG_CHECK_MODULES(GIO2, [
-    gio-2.0 >= glib_required_version
+    gio-2.0 gio-unix-2.0 >= glib_required_version
 ])
 PKG_CHECK_MODULES(GTHREAD2, [
     gthread-2.0 >= glib_required_version
@@ -196,6 +197,10 @@ AC_ARG_ENABLE(xim,
     [enable_xim=yes]
 )
 AM_CONDITIONAL([ENABLE_XIM], [test x"$enable_xim" = x"yes"])
+
+if test x"$enable_xim" = x"yes"; then
+    AC_SUBST([XIM_CLI_ARG], [--xim])
+fi
 
 # --enable-wayland option.
 AC_ARG_ENABLE(wayland,
@@ -256,6 +261,15 @@ if test x"$enable_xim" = x"yes"; then
 else
     enable_xim="no (disabled, use --enable-xim to enable)"
 fi
+
+if $PKG_CONFIG --exists x11; then
+    X11_PREFIX="`$PKG_CONFIG --variable=prefix x11`"
+elif test x"$prefix" != xNONE; then
+    X11_PREFIX="$prefix"
+else
+    X11_PREFIX="$ac_default_prefix"
+fi
+AC_SUBST(X11_PREFIX)
 
 if test x"$enable_wayland" = x"yes"; then
     # Check for wayland
@@ -589,12 +603,99 @@ if test x"$enable_libnotify" = x"yes"; then
     enable_libnotify="yes (enabled, use --disable-libnotify to disable)"
 fi
 
+# --disable-emoji-dict option.
+AC_ARG_ENABLE(emoji-dict,
+    AS_HELP_STRING([--disable-emoji-dict],
+                   [Do not build Emoji dict files]),
+    [enable_emoji_dict=$enableval],
+    [enable_emoji_dict=yes]
+)
+AM_CONDITIONAL([ENABLE_EMOJI_DICT], [test x"$enable_emoji_dict" = x"yes"])
+
+AC_ARG_WITH(unicode-emoji-dir,
+    AS_HELP_STRING([--with-unicode-emoji-dir[=DIR]],
+        [Set the directory of Unicode Emoji.
+         (default: "/usr/share/unicode/emoji")]),
+    UNICODE_EMOJI_DIR=$with_unicode_emoji_dir,
+    UNICODE_EMOJI_DIR="/usr/share/unicode/emoji"
+)
+AC_SUBST(UNICODE_EMOJI_DIR)
+
+AC_ARG_WITH(emoji-annotation-dir,
+    AS_HELP_STRING([--with-emoji-annotation-dir[=DIR]],
+        [Set the directory of CLDR annotation files.
+         (default: "/usr/share/unicode/cldr/common/annotations")]),
+    EMOJI_ANNOTATION_DIR=$with_emoji_annotation_dir,
+    EMOJI_ANNOTATION_DIR="/usr/share/unicode/cldr/common/annotations"
+)
+AC_SUBST(EMOJI_ANNOTATION_DIR)
+
+if test x"$enable_emoji_dict" = x"yes"; then
+    if test ! -f $UNICODE_EMOJI_DIR/emoji-test.txt ; then
+        AC_MSG_ERROR(Not found $UNICODE_EMOJI_DIR/emoji-test.txt. You can get \
+the emoji files from http://www.unicode.org/Public/emoji/4.0/)
+    else
+        # POSIX SHELL has no ${FOO:0:1}
+        head=`echo "$UNICODE_EMOJI_DIR" | cut -c1`;
+        if test $head != "/" ; then
+            UNICODE_EMOJI_DIR=`realpath "$UNICODE_EMOJI_DIR"`
+        fi
+    fi
+    if test ! -f $EMOJI_ANNOTATION_DIR/en.xml ; then
+        AC_MSG_ERROR(Not found $EMOJI_ANNOTATION_DIR/en.xml. You can get \
+https://github.com/fujiwarat/cldr-emoji-annotation)
+    else
+        head=`echo "$EMOJI_ANNOTATION_DIR" | cut -c1`;
+        if test $head != "/" ; then
+            EMOJI_ANNOTATION_DIR=`realpath "$EMOJI_ANNOTATION_DIR"`
+        fi
+    fi
+    enable_emoji_dict="yes (enabled, use --disable-emoji-dict to disable)"
+fi
+
+# --disable-unicode-dict option.
+AC_ARG_ENABLE(unicode-dict,
+    AS_HELP_STRING([--disable-unicode-dict],
+                   [Do not build Unicode dict files]),
+    [enable_unicode_dict=$enableval],
+    [enable_unicode_dict=yes]
+)
+AM_CONDITIONAL([ENABLE_UNICODE_DICT], [test x"$enable_unicode_dict" = x"yes"])
+
+AC_ARG_WITH(ucd-dir,
+    AS_HELP_STRING([--with-ucd-dir[=DIR]],
+        [Set the directory of UCD (Unicode Character Database) files.
+         (default: "/usr/share/unicode/ucd")]),
+    UCD_DIR=$with_emoji_annotation_dir,
+    UCD_DIR="/usr/share/unicode/ucd"
+)
+AC_SUBST(UCD_DIR)
+
+if test x"$enable_unicode_dict" = x"yes"; then
+    if test ! -f $UCD_DIR/NamesList.txt ; then
+        AC_MSG_ERROR(Not found $UCD_DIR/NamesList.txt. You can get \
+the UCD files from https://www.unicode.org/Public/UNIDATA/)
+    elif test ! -f $UCD_DIR/Blocks.txt ; then
+        AC_MSG_ERROR(Not found $UCD_DIR/Blocks.txt. You can get \
+the UCD files from https://www.unicode.org/Public/UNIDATA/)
+    else
+        # POSIX SHELL has no ${FOO:0:1}
+        head=`echo "$UCD_DIR" | cut -c1`;
+        if test $head != "/" ; then
+            UCD_DIR=`realpath "$UCD_DIR"`
+        fi
+    fi
+    enable_unicode_dict="yes (enabled, use --disable-unicode-dict to disable)"
+fi
+
 # Check iso-codes.
 PKG_CHECK_MODULES(ISOCODES, [
     iso-codes
 ])
-ISOCODES_PREFIX=`pkg-config iso-codes --variable=prefix`
+ISOCODES_PREFIX=`$PKG_CONFIG iso-codes --variable=prefix`
 AC_SUBST(ISOCODES_PREFIX)
+
+AC_SUBST([GDBUS_CODEGEN], [`$PKG_CONFIG --variable gdbus_codegen gio-2.0`])
 
 # OUTPUT files
 AC_CONFIG_FILES([ po/Makefile.in
@@ -610,10 +711,12 @@ src/Makefile
 src/ibusversion.h
 src/tests/Makefile
 bus/Makefile
+portal/Makefile
 engine/Makefile
 util/Makefile
 util/IMdkit/Makefile
 data/Makefile
+data/annotations/Makefile
 data/icons/Makefile
 data/keymaps/Makefile
 data/dconf/Makefile
@@ -672,6 +775,11 @@ Build options:
   Panel icon                    "$IBUS_ICON_KEYBOARD"
   Enable surrounding-text       $enable_surrounding_text
   Enable libnotify              $enable_libnotify
+  Enable Emoji dict             $enable_emoji_dict
+  Unicode Emoji directory       $UNICODE_EMOJI_DIR
+  CLDR annotation directory     $EMOJI_ANNOTATION_DIR
+  Enable Unicode dict           $enable_unicode_dict
+  UCD directory                 $UCD_DIR
   Run test cases                $enable_tests
 ])
 

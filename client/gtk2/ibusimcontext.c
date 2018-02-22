@@ -2,7 +2,8 @@
 /* vim:set et sts=4: */
 /* ibus - The Input Bus
  * Copyright (C) 2008-2013 Peng Huang <shawn.p.huang@gmail.com>
- * Copyright (C) 2008-2013 Red Hat, Inc.
+ * Copyright (C) 2015-2017 Takao Fujiwara <takao.fujiwara1@gmail.com>
+ * Copyright (C) 2008-2017 Red Hat, Inc.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -29,6 +30,10 @@
 #include <gdk/gdkkeysyms.h>
 #include <ibus.h>
 #include "ibusimcontext.h"
+
+#ifdef GDK_WINDOWING_WAYLAND
+#include <gdk/gdkwayland.h>
+#endif
 
 #if !GTK_CHECK_VERSION (2, 91, 0)
 #  define DEPRECATED_GDK_KEYSYMS 1
@@ -241,6 +246,51 @@ _focus_out_cb (GtkWidget     *widget,
         ibus_input_context_focus_out (_fake_context);
     }
     return FALSE;
+}
+
+static gboolean
+ibus_im_context_commit_event (IBusIMContext *ibusimcontext,
+                              GdkEventKey   *event)
+{
+    int i;
+    GdkModifierType no_text_input_mask;
+    gunichar ch;
+
+    if (event->type == GDK_KEY_RELEASE)
+        return FALSE;
+    /* Ignore modifier key presses */
+    for (i = 0; i < G_N_ELEMENTS (IBUS_COMPOSE_IGNORE_KEYLIST); i++)
+        if (event->keyval == IBUS_COMPOSE_IGNORE_KEYLIST[i])
+            return FALSE;
+#if GTK_CHECK_VERSION (3, 4, 0)
+    no_text_input_mask = gdk_keymap_get_modifier_mask (
+            gdk_keymap_get_for_display (gdk_display_get_default ()),
+            GDK_MODIFIER_INTENT_NO_TEXT_INPUT);
+#else
+#  ifndef GDK_WINDOWING_QUARTZ
+#    define _IBUS_NO_TEXT_INPUT_MOD_MASK (GDK_MOD1_MASK | GDK_CONTROL_MASK)
+#  else
+#    define _IBUS_NO_TEXT_INPUT_MOD_MASK (GDK_MOD2_MASK | GDK_CONTROL_MASK)
+#  endif
+
+    no_text_input_mask = _IBUS_NO_TEXT_INPUT_MOD_MASK;
+
+#  undef _IBUS_NO_TEXT_INPUT_MOD_MASK
+#endif
+    if (event->state & no_text_input_mask ||
+        event->keyval == GDK_KEY_Return ||
+        event->keyval == GDK_KEY_ISO_Enter ||
+        event->keyval == GDK_KEY_KP_Enter) {
+        return FALSE;
+    }
+    ch = ibus_keyval_to_unicode (event->keyval);
+    if (ch != 0 && !g_unichar_iscntrl (ch)) {
+        IBusText *text = ibus_text_new_from_unichar (ch);
+        g_signal_emit (ibusimcontext, _signal_commit_id, 0, text->text);
+        g_object_unref (text);
+        return TRUE;
+    }
+   return FALSE;
 }
 
 static void
@@ -579,12 +629,7 @@ ibus_im_context_class_init (IBusIMContextClass *class)
 
     /* init bus object */
     if (_bus == NULL) {
-        const gchar *dname = gdk_display_get_name (gdk_display_get_default ());
-        /* ibus-daemon uses DISPLAY variable. */
-        if (g_strcmp0 (dname, "Wayland") == 0)
-            dname = g_getenv ("DISPLAY");
-        ibus_set_display (dname);
-        _bus = ibus_bus_new_async ();
+        _bus = ibus_bus_new_async_client ();
 
         /* init the global fake context */
         if (ibus_bus_is_connected (_bus)) {
@@ -604,7 +649,7 @@ ibus_im_context_class_init (IBusIMContextClass *class)
     }
 
     _daemon_name_watch_id = g_bus_watch_name (G_BUS_TYPE_SESSION,
-                                              IBUS_SERVICE_IBUS,
+                                              ibus_bus_get_service_name (_bus),
                                               G_BUS_NAME_WATCHER_FLAGS_NONE,
                                               daemon_name_appeared,
                                               daemon_name_vanished,
@@ -798,8 +843,11 @@ ibus_im_context_filter_keypress (GtkIMContext *context,
     if (event->state & IBUS_HANDLED_MASK)
         return TRUE;
 
+    /* Do not call gtk_im_context_filter_keypress() because
+     * gtk_im_context_simple_filter_keypress() binds Ctrl-Shift-u
+     */
     if (event->state & IBUS_IGNORED_MASK)
-        return gtk_im_context_filter_keypress (ibusimcontext->slave, event);
+        return ibus_im_context_commit_event (ibusimcontext, event);
 
     /* XXX it is a workaround for some applications do not set client
      * window. */
@@ -1000,6 +1048,24 @@ ibus_im_context_set_client_window (GtkIMContext *context, GdkWindow *client)
         gtk_im_context_set_client_window (ibusimcontext->slave, client);
 }
 
+static void
+_set_rect_scale_factor_with_window (GdkRectangle *area,
+                                    GdkWindow    *window)
+{
+#if GTK_CHECK_VERSION (3, 10, 0)
+    int scale_factor;
+
+    g_assert (area);
+    g_assert (GDK_IS_WINDOW (window));
+
+    scale_factor = gdk_window_get_scale_factor (window);
+    area->x *= scale_factor;
+    area->y *= scale_factor;
+    area->width *= scale_factor;
+    area->height *= scale_factor;
+#endif
+}
+
 static gboolean
 _set_cursor_location_internal (IBusIMContext *ibusimcontext)
 {
@@ -1011,6 +1077,32 @@ _set_cursor_location_internal (IBusIMContext *ibusimcontext)
     }
 
     area = ibusimcontext->cursor_area;
+
+#ifdef GDK_WINDOWING_WAYLAND
+    if (GDK_IS_WAYLAND_DISPLAY (gdk_display_get_default ())) {
+        gdouble px, py;
+        GdkWindow *parent;
+        GdkWindow *window = ibusimcontext->client_window;
+
+        while ((parent = gdk_window_get_effective_parent (window)) != NULL) {
+            gdk_window_coords_to_parent (window, area.x, area.y, &px, &py);
+            area.x = px;
+            area.y = py;
+            window = parent;
+        }
+
+        _set_rect_scale_factor_with_window (&area,
+                                            ibusimcontext->client_window);
+        ibus_input_context_set_cursor_location_relative (
+            ibusimcontext->ibuscontext,
+            area.x,
+            area.y,
+            area.width,
+            area.height);
+        return FALSE;
+    }
+#endif
+
     if (area.x == -1 && area.y == -1 && area.width == 0 && area.height == 0) {
 #if GTK_CHECK_VERSION (2, 91, 0)
         area.x = 0;
@@ -1026,6 +1118,7 @@ _set_cursor_location_internal (IBusIMContext *ibusimcontext)
     gdk_window_get_root_coords (ibusimcontext->client_window,
                                 area.x, area.y,
                                 &area.x, &area.y);
+    _set_rect_scale_factor_with_window (&area, ibusimcontext->client_window);
     ibus_input_context_set_cursor_location (ibusimcontext->ibuscontext,
                                             area.x,
                                             area.y,

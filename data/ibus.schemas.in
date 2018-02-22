@@ -64,7 +64,7 @@
       <default>[ara,bg,cz,dev,gr,gur,in,jp(kana),mal,mkd,ru,ua]</default>
       <locale name="C">
         <short>Latin layouts which have no ASCII</short>
-           <long>US layout is appended to the latin layouts. variant can be
+           <long>US layout is appended to the Latin layouts. variant can be
                  omitted.
            </long>
       </locale>
@@ -299,7 +299,7 @@
                   and blue, 3. a RGB color in form 'rgb(r,g,b)' or
                   4. a RGBA color in form 'rgba(r,g,b,a)' where 'r',
                   'g', and 'b' are either integers in the range 0 to 255
-                  or precentage values in the range 0% to 100%, and
+                  or percentage values in the range 0% to 100%, and
                   'a' is a floating point value in the range 0 to 1
                   of the alpha.</long>
       </locale>
@@ -351,6 +351,140 @@
       <locale name="C">
         <short>Custom font</short>
 	    <long>Custom font name for language panel</long>
+      </locale>
+    </schema>
+    <schema>
+      <key>/schemas/desktop/ibus/panel/emoji/hotkey</key>
+      <applyto>/desktop/ibus/panel/emoji/hotkey</applyto>
+      <owner>ibus</owner>
+      <type>list</type>
+      <list_type>string</list_type>
+      <default>[&lt;Control&gt;&lt;Shift&gt;e]</default>
+      <locale name="C">
+        <short>Emoji shortcut keys for gtk_accelerator_parse</short>
+          <long>The shortcut keys for turning emoji typing on or off</long>
+      </locale>
+    </schema>
+    <schema>
+      <key>/schemas/desktop/ibus/panel/emoji/font</key>
+      <applyto>/desktop/ibus/panel/emoji/font</applyto>
+      <owner>ibus</owner>
+      <type>string</type>
+      <default>Monospace 16</default>
+      <locale name="C">
+        <short>Custom font</short>
+	    <long>Custom font name for emoji characters on emoji dialog</long>
+      </locale>
+    </schema>
+    <schema>
+      <key>/schemas/desktop/ibus/panel/emoji/lang</key>
+      <applyto>/desktop/ibus/panel/emoji/lang</applyto>
+      <owner>ibus</owner>
+      <type>string</type>
+      <default>en</default>
+      <locale name="C">
+        <short>Default language for emoji dictionary</short>
+	    <long>Choose a default language of emoji dictionaries on
+	          the emoji dialog. The value $lang is applied to
+                  /usr/share/ibus/dicts/emoji-$lang.dict
+            </long>
+      </locale>
+    </schema>
+    <schema>
+      <key>/schemas/desktop/ibus/panel/emoji/favorites</key>
+      <applyto>/desktop/ibus/panel/emoji/favorites</applyto>
+      <owner>ibus</owner>
+      <type>list</type>
+      <default>[]</default>
+      <list_type>string</list_type>
+      <locale name="C">
+        <short>favorite emoji list on emoji dialog</short>
+	    <long>You can show the favorite emojis on emoji list
+                  if this list has any characters.</long>
+      </locale>
+    </schema>
+    <schema>
+      <key>/schemas/desktop/ibus/panel/emoji/favorite-annotations</key>
+      <applyto>/desktop/ibus/panel/emoji/favorite-annotations</applyto>
+      <owner>ibus</owner>
+      <type>list</type>
+      <default>[]</default>
+      <list_type>string</list_type>
+      <locale name="C">
+        <short>favorite emoji annotation list on emoji dialog</short>
+	    <long>You can assign an annotation for a favorite emoji
+                  in this list.</long>
+      </locale>
+    </schema>
+    <schema>
+      <key>/schemas/desktop/ibus/panel/emoji/has-partial-match</key>
+      <applyto>/desktop/ibus/panel/emoji/has-partial-match</applyto>
+      <owner>ibus</owner>
+      <type>bool</type>
+      <default>false</default>
+      <locale name="C">
+        <short>Whether emoji annotations can be match partially or not</short>
+	    <long>Whether emoji annotations can be matched with a partial
+                  string instead of the exact match or not.</long>
+      </locale>
+    </schema>
+    <schema>
+      <key>/schemas/desktop/ibus/panel/emoji/partial-match-length</key>
+      <applyto>/desktop/ibus/panel/emoji/partial-match-length</applyto>
+      <owner>ibus</owner>
+      <type>int</type>
+      <default>3</default>
+      <locale name="C">
+        <short>Match emoji annotations with the specified length</short>
+	    <long>Match emoji annotations partially with more than
+                  the specified number of characters instead of
+                  the exact match.</long>
+      </locale>
+    </schema>
+    <schema>
+      <key>/schemas/desktop/ibus/panel/emoji/partial-match-condition</key>
+      <applyto>/desktop/ibus/panel/emoji/partial-match-condition</applyto>
+      <owner>ibus</owner>
+      <type>int</type>
+      <default>0</default>
+      <locale name="C">
+        <short>Choose a condition to match emoji annotations partially</short>
+	    <long>Choose one of the following conditions to match emoji
+	          annotations partially:
+                  0 == Prefix match, 1 == Suffix match, 2 == Containing match
+                  </long>
+      </locale>
+    </schema>
+    <schema>
+      <key>/schemas/desktop/ibus/panel/emoji/load-emoji-at-startup</key>
+      <applyto>/desktop/ibus/panel/emoji/load-emoji-at-startup</applyto>
+      <owner>ibus</owner>
+      <type>bool</type>
+      <default>true</default>
+      <locale name="C">
+        <short>Load the emoji data at the time of startup</short>
+	    <long>Load the emoji data at the time of startup if true.
+                  About 10MB memory is needed to load the data.
+                  Load the emoji data when open the emoji dialog at the
+                  beginning if false.
+            </long>
+      </locale>
+    </schema>
+    <schema>
+      <key>/schemas/desktop/ibus/panel/emoji/load-unicode-at-startup</key>
+      <applyto>/desktop/ibus/panel/emoji/load-unicode-at-startup</applyto>
+      <owner>ibus</owner>
+      <type>bool</type>
+      <default>false</default>
+      <locale name="C">
+        <short>Load the Unicode data at the time of startup</short>
+	    <long>Load the Unicode data at the time of startup if true.
+                  About 15MB memory is needed to load the data.
+                  Load the Unicode data when open the emoji dialog at the
+                  beginning if false.
+                  The Unicode data is always loaded after the emoji data
+                  is loaded even if true.
+            </long>
       </locale>
     </schema>
     <schema>

@@ -3,7 +3,8 @@
 # ibus - The Input Bus
 #
 # Copyright (c) 2007-2013 Peng Huang <shawn.p.huang@gmail.com>
-# Copyright (c) 2007-2013 Red Hat, Inc.
+# Copyright (c) 2015-2017 Takao Fujiwara <takao.fujiwara1@gmail.com>
+# Copyright (c) 2007-2017 Red Hat, Inc.
 #
 # This library is free software; you can redistribute it and/or
 # modify it under the terms of the GNU Lesser General Public
@@ -23,6 +24,8 @@
 NULL =
 
 libibus = $(top_builddir)/src/libibus-@IBUS_API_VERSION@.la
+libibus_emoji_dialog = \
+    $(top_builddir)/ui/gtk3/libibus-emoji-dialog-@IBUS_API_VERSION@.la
 
 # force include config.h before gi18n.h.
 AM_CPPFLAGS = \
@@ -36,6 +39,7 @@ AM_CFLAGS = \
 	@GIO2_CFLAGS@ \
 	@GTHREAD2_CFLAGS@ \
 	-DG_LOG_DOMAIN=\"IBUS\" \
+	-DLIBEXECDIR=\"$(libexecdir)\" \
 	-DIBUS_DISABLE_DEPRECATED \
 	-Wno-unused-variable \
 	-Wno-unused-but-set-variable \
@@ -94,5 +98,13 @@ CLEANFILES = \
 	$(man_one_DATA) \
 	$(man_one_files) \
 	$(NULL)
+
+if ENABLE_EMOJI_DICT
+if ENABLE_UI
+AM_VALAFLAGS += \
+    --define=EMOJI_DICT \
+    $(NULL)
+endif
+endif
 
 -include $(top_srcdir)/git.mk

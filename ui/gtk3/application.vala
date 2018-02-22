@@ -3,6 +3,7 @@
  * ibus - The Input Bus
  *
  * Copyright(c) 2011 Peng Huang <shawn.p.huang@gmail.com>
+ * Copyright(c) 2017 Takao Fujiwara <takao.fujiwara1@gmail.com>
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -90,7 +91,16 @@ class Application {
                                   string interface_name,
                                   string signal_name,
                                   Variant parameters) {
+        // "Destroy" dbus method was called before this callback is called.
+        // "Destroy" dbus method -> ibus_service_destroy()
+        // -> g_dbus_connection_unregister_object()
+        // -> g_object_unref(m_panel) will be called later with an idle method,
+        // which was assigned in the arguments of
+        // g_dbus_connection_register_object()
         debug("signal_name = %s", signal_name);
+
+        // unref m_panel
+        m_panel.disconnect_signals();
         m_panel = null;
     }
 
@@ -104,6 +114,15 @@ class Application {
     }
 
     public static void main(string[] argv) {
+        // https://bugzilla.redhat.com/show_bug.cgi?id=1226465#c20
+        // In /etc/xdg/plasma-workspace/env/gtk3_scrolling.sh
+        // Plasma deskop sets this variable and prevents Super-space,
+        // and Ctrl-Shift-e when ibus-ui-gtk3 runs after the
+        // desktop is launched.
+        GLib.Environment.unset_variable("GDK_CORE_DEVICE_EVENTS");
+        // for Gdk.X11.get_default_xdisplay()
+        Gdk.set_allowed_backends("x11");
+
         Application app = new Application(argv);
         app.run();
     }

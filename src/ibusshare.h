@@ -2,7 +2,8 @@
 /* vim:set et sts=4: */
 /* ibus - The Input Bus
  * Copyright (C) 2008-2013 Peng Huang <shawn.p.huang@gmail.com>
- * Copyright (C) 2008-2013 Red Hat, Inc.
+ * Copyright (C) 2015-2018 Takao Fujiwara <takao.fujiwara1@gmail.com>
+ * Copyright (C) 2008-2018 Red Hat, Inc.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -52,11 +53,25 @@
 #define IBUS_SERVICE_IBUS       "org.freedesktop.IBus"
 
 /**
+ * IBUS_SERVICE_PORTAL:
+ *
+ * Address of IBus portalservice.
+ */
+#define IBUS_SERVICE_PORTAL     "org.freedesktop.portal.IBus"
+
+/**
  * IBUS_SERVICE_PANEL:
  *
  * Address of IBus panel service.
  */
 #define IBUS_SERVICE_PANEL      "org.freedesktop.IBus.Panel"
+
+/**
+ * IBUS_SERVICE_PANEL_EXTENSION:
+ *
+ * Address of IBus panel extension service.
+ */
+#define IBUS_SERVICE_PANEL_EXTENSION "org.freedesktop.IBus.Panel.Extension"
 
 /**
  * IBUS_SERVICE_CONFIG:
@@ -94,6 +109,13 @@
 #define IBUS_PATH_PANEL         "/org/freedesktop/IBus/Panel"
 
 /**
+ * IBUS_PATH_PANEL_EXTENSION:
+ *
+ * D-Bus path for IBus panel.
+ */
+#define IBUS_PATH_PANEL_EXTENSION "/org/freedesktop/IBus/Panel/Extension"
+
+/**
  * IBUS_PATH_CONFIG:
  *
  * D-Bus path for IBus config.
@@ -120,6 +142,13 @@
  * D-Bus interface for IBus.
  */
 #define IBUS_INTERFACE_IBUS     "org.freedesktop.IBus"
+
+/**
+ * IBUS_INTERFACE_PORTAL:
+ *
+ * D-Bus interface for IBus portal.
+ */
+#define IBUS_INTERFACE_PORTAL   "org.freedesktop.IBus.Portal"
 
 /**
  * IBUS_INTERFACE_INPUT_CONTEXT:

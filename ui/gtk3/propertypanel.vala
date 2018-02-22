@@ -2,9 +2,9 @@
  *
  * ibus - The Input Bus
  *
- * Copyright(c) 2013-2015 Red Hat, Inc.
+ * Copyright(c) 2013-2016 Red Hat, Inc.
  * Copyright(c) 2013-2015 Peng Huang <shawn.p.huang@gmail.com>
- * Copyright(c) 2013-2015 Takao Fujiwara <takao.fujiwara1@gmail.com>
+ * Copyright(c) 2013-2017 Takao Fujiwara <takao.fujiwara1@gmail.com>
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -42,7 +42,9 @@ public class PropertyPanel : Gtk.Box {
     private uint m_auto_hide_timeout = 10000;
     private uint m_auto_hide_timeout_id = 0;
     private bool m_follow_input_cursor_when_always_shown = false;
-    private const uint MONITOR_NET_WORKAREA_TIMEOUT = 60000;
+    // The timeout indicates milliseconds. 1000 msec == 1 sec
+    private const uint MONITOR_NET_WORKAREA_TIMEOUT = 300000;
+    private uint m_remove_filter_id;
 
     public PropertyPanel() {
         /* Chain up base class constructor */
@@ -86,8 +88,25 @@ public class PropertyPanel : Gtk.Box {
     public void set_properties(IBus.PropList props) {
         debug("set_properties()\n");
 
+        // When click PropMenuToolButton, the focus is changed and
+        // set_properties() is called here while the menu button is active.
+        // Ignore that case here not to remove items.
+        bool has_active = false;
+        foreach (var item in m_items) {
+            Type type = item.get_type();
+            if (type == typeof(PropMenuToolButton) ||
+                type == typeof(PropToggleToolButton)) {
+                if ((item as Gtk.ToggleToolButton).get_active()) {
+                    has_active = true;
+                    break;
+                }
+            }
+        }
+        if (has_active)
+            return;
+
         foreach (var item in m_items)
-            (item as Gtk.Widget).destroy();
+            remove((item as Gtk.Widget));
         m_items = {};
 
         m_props = props;
@@ -257,6 +276,7 @@ public class PropertyPanel : Gtk.Box {
         m_follow_input_cursor_when_always_shown = is_follow;
     }
 
+/* hgneng
     public override void get_preferred_width(out int minimum_width,
                                              out int natural_width) {
         base.get_preferred_width(out minimum_width, out natural_width);
@@ -270,6 +290,7 @@ public class PropertyPanel : Gtk.Box {
     }
 
     private int guessState = 0;
+    */
     private void create_menu_items() {
         int i = 0;
         while (true) {
@@ -368,8 +389,16 @@ public class PropertyPanel : Gtk.Box {
         Gtk.Allocation allocation;
         m_toplevel.get_allocation(out allocation);
 
+        Gdk.Rectangle monitor_area;
+#if VALA_0_34
+        // gdk_screen_get_monitor_workarea() no longer return the correct
+        // area from "_NET_WORKAREA" atom in GTK 3.22
+        Gdk.Monitor monitor = Gdk.Display.get_default().get_monitor(0);
+        monitor_area = monitor.get_workarea();
+#else
         Gdk.Screen screen = Gdk.Screen.get_default();
-        Gdk.Rectangle monitor_area = screen.get_monitor_workarea(0);
+        monitor_area = screen.get_monitor_workarea(0);
+#endif
         int monitor_right = monitor_area.x + monitor_area.width;
         int monitor_bottom = monitor_area.y + monitor_area.height;
         int x, y;
@@ -403,6 +432,11 @@ public class PropertyPanel : Gtk.Box {
             string aname = m_xdisplay.get_atom_name(xevent.xproperty.atom);
             if (aname == "_NET_WORKAREA" && xevent.xproperty.state == 0) {
                 set_default_location();
+                m_root_window.remove_filter(root_window_filter);
+                if (m_remove_filter_id > 0) {
+                    GLib.Source.remove(m_remove_filter_id);
+                    m_remove_filter_id = 0;
+                }
                 return Gdk.FilterReturn.CONTINUE;
             }
         }
@@ -417,7 +451,9 @@ public class PropertyPanel : Gtk.Box {
 
         m_root_window.add_filter(root_window_filter);
 
-        GLib.Timeout.add(MONITOR_NET_WORKAREA_TIMEOUT, () => {
+        m_remove_filter_id = GLib.Timeout.add(MONITOR_NET_WORKAREA_TIMEOUT,
+                                              () => {
+            m_remove_filter_id = 0;
             m_root_window.remove_filter(root_window_filter);
             return false;
         },
@@ -425,6 +461,15 @@ public class PropertyPanel : Gtk.Box {
     }
 
     private void show_with_auto_hide_timer() {
+        /* Do not call gtk_window_resize() in
+         * GtkWidgetClass->get_preferred_width()
+         * because the following warning is shown in GTK 3.20:
+         * "Allocating size to GtkWindow %x without calling
+         * gtk_widget_get_preferred_width/height(). How does the code
+         * know the size to allocate?"
+         * in gtk_widget_size_allocate_with_baseline() */
+        m_toplevel.resize(1, 1);
+
         if (m_items.length == 0) {
             /* Do not blink the panel with focus-in in case the panel
              * is always shown. */
@@ -504,12 +549,21 @@ public class PropMenu : Gtk.Menu, IPropToolItem {
     public new void popup(uint       button,
                           uint32     activate_time,
                           Gtk.Widget widget) {
+#if VALA_0_34
+        base.popup_at_widget(widget,
+                             Gdk.Gravity.SOUTH_WEST,
+                             Gdk.Gravity.NORTH_WEST,
+                             null);
+#else
         m_parent_button = widget;
         base.popup(null, null, menu_position, button, activate_time);
+#endif
     }
 
     public override void destroy() {
         m_parent_button = null;
+        foreach (var item in m_items)
+            remove((item as Gtk.Widget));
         m_items = {};
         base.destroy();
     }
@@ -563,6 +617,7 @@ public class PropMenu : Gtk.Menu, IPropToolItem {
         }
     }
 
+#if !VALA_0_34
     private void menu_position(Gtk.Menu menu,
                                out int  x,
                                out int  y,
@@ -611,6 +666,7 @@ public class PropMenu : Gtk.Menu, IPropToolItem {
 
         push_in = false;
     }
+#endif
 }
 
 public class PropToolButton : Gtk.ToolButton, IPropToolItem {
@@ -770,7 +826,7 @@ public class PropMenuToolButton : PropToggleToolButton, IPropToolItem {
         m_menu = new PropMenu(prop);
         m_menu.deactivate.connect((m) =>
                                   set_active(false));
-        m_menu.property_activate.connect((w, k, s) =>
+        m_menu.property_activate.connect((k, s) =>
                                          property_activate(k, s));
 
         base.set_property(prop);

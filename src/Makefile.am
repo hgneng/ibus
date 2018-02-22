@@ -3,7 +3,8 @@
 # ibus - The Input Bus
 #
 # Copyright (c) 2007-2015 Peng Huang <shawn.p.huang@gmail.com>
-# Copyright (c) 2007-2015 Red Hat, Inc.
+# Copyright (c) 2015-2018 Takao Fujiwara <takao.fujiwara1@gmail.com>
+# Copyright (c) 2007-2017 Red Hat, Inc.
 #
 # This library is free software; you can redistribute it and/or
 # modify it under the terms of the GNU Lesser General Public
@@ -40,6 +41,7 @@ INTROSPECTION_COMPILER_ARGS = \
     $(NULL)
 INTROSPECTION_GIRS =
 CLEANFILES =
+noinst_PROGRAMS =
 
 # C preprocessor flags
 AM_CPPFLAGS =                                           \
@@ -52,6 +54,7 @@ AM_CPPFLAGS =                                           \
     -DIBUS_DISABLE_DEPRECATION_WARNINGS                 \
     -DIBUS_COMPILATION                                  \
     -DISOCODES_PREFIX=\"$(ISOCODES_PREFIX)\"            \
+    -DX11_DATA_PREFIX=\"$(X11_PREFIX)\"                 \
     $(NULL)
 
 # ibus library
@@ -69,86 +72,92 @@ libibus_1_0_la_LDFLAGS =            \
     $(NULL)
 
 ibus_sources =              \
-    ibusshare.c             \
-    ibusobject.c            \
-    ibusserializable.c      \
-    ibusproxy.c             \
-    ibusservice.c           \
-    ibusfactory.c           \
-    ibusengine.c            \
-    ibuserror.c             \
-    ibustext.c              \
-    ibuskeymap.c            \
     ibusattribute.c         \
     ibusattrlist.c          \
-    ibusproperty.c          \
-    ibusproplist.c          \
-    ibuslookuptable.c       \
-    ibusinputcontext.c      \
+    ibusbus.c               \
+    ibuscomponent.c         \
     ibusconfig.c            \
     ibusconfigservice.c     \
-    ibuspanelservice.c      \
-    ibusbus.c               \
+    ibusemoji.c             \
+    ibusengine.c            \
+    ibusenginedesc.c        \
+    ibusenginesimple.c      \
+    ibuserror.c             \
+    ibusfactory.c           \
+    ibushotkey.c            \
+    ibusinputcontext.c      \
+    ibuskeymap.c            \
     ibuskeynames.c          \
     ibuskeyuni.c            \
-    ibushotkey.c            \
-    ibusxml.c               \
-    ibusenginedesc.c        \
+    ibuslookuptable.c       \
+    ibusobject.c            \
     ibusobservedpath.c      \
-    ibuscomponent.c         \
-    ibusutil.c              \
-    ibusenginesimple.c      \
+    ibuspanelservice.c      \
+    ibusproperty.c          \
+    ibusproplist.c          \
+    ibusproxy.c             \
     ibusregistry.c          \
+    ibusserializable.c      \
+    ibusservice.c           \
+    ibusshare.c             \
+    ibustext.c              \
+    ibusunicode.c           \
+    ibusutil.c              \
+    ibusxevent.c            \
+    ibusxml.c               \
     $(NULL)
 libibus_1_0_la_SOURCES =    \
-    ibusmarshalers.c        \
     ibuscomposetable.c      \
     ibusenumtypes.c         \
+    ibusmarshalers.c        \
     $(ibus_sources)         \
     $(NULL)
 ibus_marshalers_sources =   \
-    ibusmarshalers.h        \
     ibusmarshalers.c        \
+    ibusmarshalers.h        \
     $(NULL)
 ibus_enumtypes_sources =    \
-    ibusenumtypes.h         \
     ibusenumtypes.c         \
+    ibusenumtypes.h         \
     $(NULL)
 ibus_headers =              \
     ibus.h                  \
-    ibusshare.h             \
-    ibusdebug.h             \
-    ibusobject.h            \
-    ibusserializable.h      \
-    ibusproxy.h             \
-    ibusservice.h           \
-    ibusfactory.h           \
-    ibusengine.h            \
-    ibuserror.h             \
-    ibustext.h              \
-    ibuskeymap.h            \
     ibusattribute.h         \
     ibusattrlist.h          \
-    ibusproperty.h          \
-    ibusproplist.h          \
-    ibuslookuptable.h       \
-    ibusinputcontext.h      \
+    ibusbus.h               \
+    ibuscomponent.h         \
     ibusconfig.h            \
     ibusconfigservice.h     \
-    ibuspanelservice.h      \
-    ibuskeysyms.h           \
-    ibuskeysyms-compat.h    \
-    ibuskeys.h              \
-    ibustypes.h             \
-    ibusbus.h               \
-    ibushotkey.h            \
-    ibusxml.h               \
+    ibusdebug.h             \
+    ibusemoji.h             \
+    ibusengine.h            \
     ibusenginedesc.h        \
-    ibusobservedpath.h      \
-    ibuscomponent.h         \
-    ibusutil.h              \
     ibusenginesimple.h      \
+    ibuserror.h             \
+    ibusfactory.h           \
+    ibushotkey.h            \
+    ibusinputcontext.h      \
+    ibuskeymap.h            \
+    ibuskeys.h              \
+    ibuskeysyms-compat.h    \
+    ibuskeysyms.h           \
+    ibuslookuptable.h       \
+    ibusobject.h            \
+    ibusobservedpath.h      \
+    ibuspanelservice.h      \
+    ibusproperty.h          \
+    ibusproplist.h          \
+    ibusproxy.h             \
     ibusregistry.h          \
+    ibusserializable.h      \
+    ibusservice.h           \
+    ibusshare.h             \
+    ibustext.h              \
+    ibustypes.h             \
+    ibusunicode.h           \
+    ibusutil.h              \
+    ibusxevent.h            \
+    ibusxml.h               \
     $(NULL)
 ibusincludedir = $(includedir)/ibus-@IBUS_API_VERSION@
 ibus_public_headers =       \
@@ -159,11 +168,14 @@ ibus_public_headers =       \
 ibusinclude_HEADERS =       \
     $(ibus_public_headers)  \
     $(NULL)
-ibus_private_headers =       \
-    ibuscomposetable.h       \
-    ibusinternal.h           \
-    keyname-table.h          \
-    gtkimcontextsimpleseqs.h \
+ibus_private_headers =          \
+    gtkimcontextsimpleseqs.h    \
+    ibuscomposetable.h          \
+    ibusemojigen.h              \
+    ibusenginesimpleprivate.h   \
+    ibusinternal.h              \
+    ibusunicodegen.h            \
+    keyname-table.h             \
     $(NULL)
 noinst_HEADERS =            \
     $(ibus_private_headers) \
@@ -228,11 +240,151 @@ ibusmarshalers.c: ibusmarshalers.h ibusmarshalers.list
 	$(GLIB_GENMARSHAL) --prefix=_ibus_marshal $(srcdir)/ibusmarshalers.list --body --internal) > $@.tmp && \
 	mv $@.tmp $@
 
+if ENABLE_EMOJI_DICT
+AM_CPPFLAGS += -DENABLE_EMOJI_DICT
+
+dictdir = $(pkgdatadir)/dicts
+dict_DATA = dicts/emoji-en.dict
+LANG_FILES = $(basename $(notdir $(wildcard $(EMOJI_ANNOTATION_DIR)/*.xml)))
+
+noinst_PROGRAMS += emoji-parser
+
+dicts/emoji-en.dict: emoji-parser
+	$(AM_V_at)if test x"$(LANG_FILES)" = x ; then \
+	    echo "WARNING: Not found $(EMOJI_ANNOTATION_DIR)/en.xml" 1>&2; \
+	fi; \
+	for f in $(LANG_FILES) ; do \
+	    if test -f \
+	    "$(EMOJI_ANNOTATION_DIR)/../annotationsDerived/$$f.xml" ; then \
+	        xml_derived_option="--xml-derived $(EMOJI_ANNOTATION_DIR)/../annotationsDerived/$$f.xml"; \
+	        plus_comment="derived"; \
+	    fi; \
+	    if test x"$$f" = xen ; then \
+	        $(builddir)/emoji-parser \
+	            --unicode-emoji-dir $(UNICODE_EMOJI_DIR) \
+	            --xml $(EMOJI_ANNOTATION_DIR)/$$f.xml \
+	            $$xml_derived_option \
+	            --xml-ascii $(top_srcdir)/data/annotations/en_ascii.xml \
+	            --out-category ibusemojigen.h \
+	            --out $@; \
+	    else \
+	        $(builddir)/emoji-parser \
+	            --unicode-emoji-dir $(UNICODE_EMOJI_DIR) \
+	            --xml $(EMOJI_ANNOTATION_DIR)/$$f.xml \
+	            $$xml_derived_option \
+	            --out dicts/emoji-$$f.dict; \
+	    fi; \
+	    echo "Generated $$plus_comment dicts/emoji-$$f.dict"; \
+	done
+
+install-data-hook: $(dict_DATA)
+	@$(NORMAL_INSTALL)
+	$(AM_V_at)list='$(wildcard dicts/*.dict)'; \
+        test -n "$(dictdir)" || list=; \
+	if test -n "$$list"; then \
+	  echo " $(MKDIR_P) '$(DESTDIR)$(dictdir)'"; \
+	  $(MKDIR_P) "$(DESTDIR)$(dictdir)" || exit 1; \
+	fi; \
+	for p in $$list; do \
+	  if test -f "$$p"; then d=; else d="$(srcdir)/"; fi; \
+	  echo "$$d$$p"; \
+	done | \
+	while read files; do \
+	  if [ x$(AM_DEFAULT_VERBOSITY) = x1 ] ; then \
+	      echo "$(INSTALL_DATA) $$files '$(DESTDIR)$(dictdir)'"; \
+	  else \
+	      echo "Installing $$files"; \
+	  fi; \
+	  $(INSTALL_DATA) $$files "$(DESTDIR)$(dictdir)" || exit $$?; \
+	done
+
+dict__uninstall_files_from_dir = { \
+    test -z "$$files" \
+        || { test ! -d "$$dir" && test ! -f "$$dir" && test ! -r "$$dir"; } \
+        || { echo " ( cd '$$dir' && rm -f" $$files ")"; \
+             cd "$$dir" && rm -f $$files; }; \
+    }
+
+# for make dist
+uninstall-hook:
+	@$(NORMAL_UNINSTALL)
+	$(AM_V_at)list='$(wildcard dicts/*.dict)'; \
+	test -n "$(dictdir)" || list=; \
+	files=`for p in $$list; do echo $$p; done | sed -e 's|^.*/||'`; \
+	dir='$(DESTDIR)$(dictdir)'; $(dict__uninstall_files_from_dir)
+
+emoji_parser_SOURCES =          \
+    emoji-parser.c              \
+    $(NULL)
+emoji_parser_CFLAGS =           \
+    $(GLIB2_CFLAGS)             \
+    $(GOBJECT2_CFLAGS)          \
+    $(NULL)
+emoji_parser_LDADD =            \
+    $(libibus)                  \
+    $(GLIB2_LIBS)               \
+    $(GOBJECT2_LIBS)            \
+    $(NULL)
+
+clean-local:
+	-rm -rf dicts
+	$(NULL)
+endif
+
+if ENABLE_UNICODE_DICT
+unicodedir = $(pkgdatadir)/dicts
+unicode_DATA = dicts/unicode-names.dict dicts/unicode-blocks.dict
+noinst_PROGRAMS += unicode-parser
+
+dicts/unicode-names.dict: unicode-parser
+	$(AM_V_at)input_file="$(UCD_DIR)/NamesList.txt"; \
+	if test ! -f "$$input_file" ; then \
+	    echo "WARNING: Not found $$input_file" 1>&2; \
+	else \
+	    $(builddir)/unicode-parser \
+	        --input-names-list $$input_file \
+	        --output-names-list $@; \
+	    echo "Generated $@"; \
+	fi;
+
+dicts/unicode-blocks.dict: unicode-parser
+	$(AM_V_at)input_file="$(UCD_DIR)/Blocks.txt"; \
+	if test ! -f "$$input_file" ; then \
+	    echo "WARNING: Not found $$input_file" 1>&2; \
+	else \
+	    $(builddir)/unicode-parser \
+	        --input-blocks $$input_file \
+	        --output-blocks-trans ibusunicodegen.h \
+	        --output-blocks $@; \
+	    echo "Generated $@"; \
+	fi;
+
+ibusunicodegen.h: dicts/unicode-blocks.dict
+	$(NULL)
+
+unicode_parser_SOURCES =        \
+    unicode-parser.c            \
+    $(NULL)
+unicode_parser_CFLAGS =         \
+    $(GLIB2_CFLAGS)             \
+    $(NULL)
+unicode_parser_LDADD =          \
+    $(GLIB2_LIBS)               \
+    $(libibus)                  \
+    $(NULL)
+
+clean-local:
+	-rm -rf dicts
+	$(NULL)
+endif
+
 EXTRA_DIST =                    \
+    emoji-parser.c              \
     ibusversion.h.in            \
     ibusmarshalers.list         \
     ibusenumtypes.h.template    \
     ibusenumtypes.c.template    \
+    unicode-parser.c            \
     $(NULL)
 
 CLEANFILES +=                   \
@@ -242,6 +394,8 @@ CLEANFILES +=                   \
     $(NULL)
 
 DISTCLEANFILES =                \
+    ibusemojigen.h              \
+    ibusunicodegen.h            \
     ibusversion.h               \
     $(NULL)
 

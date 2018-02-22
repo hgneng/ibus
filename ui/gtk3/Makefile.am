@@ -3,7 +3,8 @@
 # ibus - The Input Bus
 #
 # Copyright (c) 2007-2015 Peng Huang <shawn.p.huang@gmail.com>
-# Copyright (c) 2007-2015 Red Hat, Inc.
+# Copyright (c) 2015-2018 Takao Fujwiara <takao.fujiwara1@gmail.com>
+# Copyright (c) 2007-2018 Red Hat, Inc.
 #
 # This library is free software; you can redistribute it and/or
 # modify it under the terms of the GNU Lesser General Public
@@ -29,7 +30,7 @@ component_DATA = \
 	$(NULL)
 componentdir = $(pkgdatadir)/component
 
-gtkpanel.xml: gtkpanel.xml.in
+%.xml: %.xml.in
 	$(AM_V_GEN) sed \
 		-e 's|@VERSION[@]|$(VERSION)|g' \
 		-e 's|@libexecdir[@]|$(libexecdir)|g' $< > $@.tmp && \
@@ -50,6 +51,7 @@ AM_CFLAGS = \
 	@X11_CFLAGS@ \
 	-DG_LOG_DOMAIN=\"IBUS\" \
 	-DBINDIR=\"$(bindir)\" \
+	-DPKGDATADIR=\"$(pkgdatadir)\" \
 	-DIBUS_DISABLE_DEPRECATED \
 	-Wno-unused-variable \
 	-Wno-unused-but-set-variable \
@@ -109,8 +111,10 @@ libexec_PROGRAMS = ibus-ui-gtk3
 
 ibus_ui_gtk3_SOURCES = \
 	application.vala \
+	bindingcommon.vala \
 	candidatearea.vala \
 	candidatepanel.vala \
+	emojier.vala \
 	handle.vala \
 	iconwidget.vala \
 	indicator.vala \
@@ -138,20 +142,132 @@ gen-%.xml.c: %.xml
 	sed -e "s:\":\\\\\":g" -e s:^:\": -e s:\$$:\\\\n\": $< >> $@
 	echo ";" >> $@
 
-CLEANFILES = \
-	gtkpanel.xml \
-	$(NULL)
+CLEANFILES =            \
+    gtkpanel.xml        \
+    $(NULL)
+
+emoji_headers =         \
+    ibusemojidialog.h   \
+    $(NULL)
+
+man_seven_in_files = ibus-emoji.7.in
 
 # References:
 # libappindicator/src/notification-item.xml
 # libappindicator/src/notification-watcher.xml
 # kdelibs/kdeui/knotifications/src/org.kde.StatusNotifierItem.xml
 # kdelibs/kdeui/knotifications/src/org.kde.StatusNotifierWatcher.xml
-EXTRA_DIST = \
-	gtkpanel.xml.in \
-	notification-item.xml \
-	notification-watcher.xml \
+EXTRA_DIST =                            \
+    $(emoji_headers)                    \
+    $(man_seven_in_files)               \
+    emojierapp.vala                     \
+    extension.vala                      \
+    gtkextension.xml.in                 \
+    gtkpanel.xml.in                     \
+    notification-item.xml               \
+    notification-watcher.xml            \
+    panelbinding.vala                   \
+    $(NULL)
+
+if ENABLE_EMOJI_DICT
+AM_VALAFLAGS += --define=EMOJI_DICT
+
+libexec_PROGRAMS += ibus-ui-emojier
+
+ibus_ui_emojier_VALASOURCES =                   \
+    emojierapp.vala                             \
+    emojier.vala                                \
+    iconwidget.vala                             \
+    separator.vala                              \
+    $(NULL)
+ibus_ui_emojier_SOURCES =                       \
+    $(ibus_ui_emojier_VALASOURCES:.vala=.c)     \
+    $(NULL)
+
+ibus_ui_emojier_LDADD =                         \
+    $(AM_LDADD)                                 \
+    $(NULL)
+
+ibus_ui_emojier_VALAFLAGS =                     \
+    $(AM_VALAFLAGS)                             \
+    $(NULL)
+
+# This line and foo_VALASOURCES line can delete the duplicated entries
+# of emojier.c: emojier.vala
+emojierapp.c: $(ibus_ui_emojier_VALASOURCES)
+	$(AM_V_VALAC)$(am__cd) $(srcdir) && $(VALAC) $(AM_VALAFLAGS) \
+$(VALAFLAGS) -C $(ibus_ui_emojier_VALASOURCES)
+	$(NULL)
+# make dist creates .c files in a different srcdir
+emojierapp.o: $(srcdir)/emojierapp.c
+	$(AM_V_CC)source='$<' object='$@' libtool=no \
+	DEPDIR=$(DEPDIR) $(CCDEPMODE) $(depcomp) \
+	$(AM_V_CC_no)$(COMPILE) -c -o $@ $<
 	$(NULL)
 
+component_DATA += gtkextension.xml
+CLEANFILES += gtkextension.xml
+libexec_PROGRAMS += ibus-extension-gtk3
+
+ibus_extension_gtk3_VALASOURCES =               \
+    bindingcommon.vala                          \
+    emojier.vala                                \
+    extension.vala                              \
+    iconwidget.vala                             \
+    keybindingmanager.vala                      \
+    panelbinding.vala                           \
+    $(NULL)
+ibus_extension_gtk3_SOURCES =                   \
+    $(ibus_extension_gtk3_VALASOURCES:.vala=.c) \
+    $(NULL)
+
+ibus_extension_gtk3_LDADD =                     \
+    $(AM_LDADD)                                 \
+    $(NULL)
+ibus_extension_gtk3_VALAFLAGS =                 \
+    $(AM_VALAFLAGS)                             \
+    $(NULL)
+
+# This line and foo_VALASOURCES line can delete the duplicated entries
+# of emojier.c: emojier.vala
+extension.c: $(ibus_extension_gtk3_VALASOURCES)
+	$(AM_V_VALAC)$(am__cd) $(srcdir) && $(VALAC) $(AM_VALAFLAGS) \
+$(VALAFLAGS) -C $(ibus_extension_gtk3_VALASOURCES)
+	$(NULL)
+# make dist creates .c files in a different srcdir
+extension.o: $(srcdir)/extension.c
+	$(AM_V_CC)source='$<' object='$@' libtool=no \
+	DEPDIR=$(DEPDIR) $(CCDEPMODE) $(depcomp) \
+	$(AM_V_CC_no)$(COMPILE) -c -o $@ $<
+	$(NULL)
+# of emojier.c: emojier.vala
+panelbinding.c: $(ibus_extension_gtk3_VALASOURCES)
+	$(AM_V_VALAC)$(am__cd) $(srcdir) && $(VALAC) $(AM_VALAFLAGS) \
+$(VALAFLAGS) -C $(ibus_extension_gtk3_VALASOURCES)
+	$(NULL)
+# make dist creates .c files in a different srcdir
+panelbinding.o: $(srcdir)/panelbinding.c
+	$(AM_V_CC)source='$<' object='$@' libtool=no \
+	DEPDIR=$(DEPDIR) $(CCDEPMODE) $(depcomp) \
+	$(AM_V_CC_no)$(COMPILE) -c -o $@ $<
+	$(NULL)
+
+man_seven_files = $(man_seven_in_files:.7.in=.7)
+man_seven_DATA =$(man_seven_files:.7=.7.gz)
+man_sevendir = $(mandir)/man7
+%.7: %.7.in
+	$(AM_V_GEN) sed \
+	    -e 's|@VERSION[@]|$(VERSION)|g' $< > $@.tmp && \
+	    mv $@.tmp $@
+%.7.gz: %.7
+	$(AM_V_GEN) gzip -c $< > $@.tmp && mv $@.tmp $@
+
+CLEANFILES += \
+    $(man_seven_DATA) \
+    $(man_seven_files) \
+    $(NULL)
+
+endif
+# end of ENABLE_EMOJI_DICT
 
 -include $(top_srcdir)/git.mk

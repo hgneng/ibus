@@ -2,7 +2,8 @@
 /* vim:set et sts=4: */
 /* ibus - The Input Bus
  * Copyright (C) 2008-2014 Peng Huang <shawn.p.huang@gmail.com>
- * Copyright (C) 2008-2014 Red Hat, Inc.
+ * Copyright (C) 2015-2018 Takao Fujiwara <takao.fujiwara1@gmail.com>
+ * Copyright (C) 2008-2016 Red Hat, Inc.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -34,7 +35,7 @@ struct _SetEngineByDescData {
     /* context related to the data */
     BusInputContext *context;
     /* set engine by desc result, cancellable */
-    GSimpleAsyncResult *simple;
+    GTask *task;
     /* a object to cancel bus_engine_proxy_new call */
     GCancellable *cancellable;
     /* a object being passed to the bus_input_context_set_engine_by_desc function. if origin_cancellable is cancelled by someone,
@@ -105,6 +106,7 @@ struct _BusInputContextClass {
 enum {
     PROCESS_KEY_EVENT,
     SET_CURSOR_LOCATION,
+    SET_CURSOR_LOCATION_RELATIVE,
     FOCUS_IN,
     FOCUS_OUT,
     UPDATE_PREEDIT_TEXT,
@@ -159,9 +161,6 @@ static gboolean bus_input_context_service_set_property
                                     GError               **error);
 static void     bus_input_context_unset_engine
                                    (BusInputContext       *context);
-static void     bus_input_context_commit_text
-                                   (BusInputContext       *context,
-                                    IBusText              *text);
 static void     bus_input_context_update_preedit_text
                                    (BusInputContext       *context,
                                     IBusText              *text,
@@ -225,6 +224,12 @@ static const gchar introspection_xml[] =
     "      <arg direction='out' type='b' name='handled' />"
     "    </method>"
     "    <method name='SetCursorLocation'>"
+    "      <arg direction='in' type='i' name='x' />"
+    "      <arg direction='in' type='i' name='y' />"
+    "      <arg direction='in' type='i' name='w' />"
+    "      <arg direction='in' type='i' name='h' />"
+    "    </method>"
+    "    <method name='SetCursorLocationRelative'>"
     "      <arg direction='in' type='i' name='x' />"
     "      <arg direction='in' type='i' name='y' />"
     "      <arg direction='in' type='i' name='w' />"
@@ -361,6 +366,20 @@ bus_input_context_class_init (BusInputContextClass *class)
 
     context_signals[SET_CURSOR_LOCATION] =
         g_signal_new (I_("set-cursor-location"),
+            G_TYPE_FROM_CLASS (class),
+            G_SIGNAL_RUN_LAST,
+            0,
+            NULL, NULL,
+            bus_marshal_VOID__INT_INT_INT_INT,
+            G_TYPE_NONE,
+            4,
+            G_TYPE_INT,
+            G_TYPE_INT,
+            G_TYPE_INT,
+            G_TYPE_INT);
+
+    context_signals[SET_CURSOR_LOCATION_RELATIVE] =
+        g_signal_new (I_("set-cursor-location-relative"),
             G_TYPE_FROM_CLASS (class),
             G_SIGNAL_RUN_LAST,
             0,
@@ -651,8 +670,10 @@ bus_input_context_send_signal (BusInputContext *context,
                                GVariant        *parameters,
                                GError         **error)
 {
-    if (context->connection == NULL)
+    if (context->connection == NULL) {
+        g_variant_unref (parameters);
         return TRUE;
+    }
 
     GDBusMessage *message = g_dbus_message_new_signal (ibus_service_get_object_path ((IBusService *)context),
                                                        interface_name,
@@ -682,8 +703,10 @@ bus_input_context_emit_signal (BusInputContext *context,
                                GVariant        *parameters,
                                GError         **error)
 {
-    if (context->connection == NULL)
+    if (context->connection == NULL) {
+        g_variant_unref (parameters);
         return TRUE;
+    }
 
     return bus_input_context_send_signal (context,
                                           "org.freedesktop.IBus.InputContext",
@@ -843,6 +866,38 @@ _ic_set_cursor_location (BusInputContext       *context,
                        context->y,
                        context->w,
                        context->h);
+    }
+}
+
+/**
+ * _ic_set_cursor_location_relative:
+ *
+ * Implement the "SetCursorLocationRelative" method call of the
+ * org.freedesktop.IBus.InputContext interface.
+ *
+ * Unlike _ic_set_cursor_location, this doesn't deliver the location
+ * to the engine proxy, since the relative coordinates are not very
+ * useful for engines.
+ */
+static void
+_ic_set_cursor_location_relative (BusInputContext       *context,
+                                  GVariant              *parameters,
+                                  GDBusMethodInvocation *invocation)
+{
+    gint x, y, w, h;
+
+    g_dbus_method_invocation_return_value (invocation, NULL);
+
+    g_variant_get (parameters, "(iiii)", &x, &y, &w, &h);
+
+    if (context->capabilities & IBUS_CAP_FOCUS) {
+        g_signal_emit (context,
+                       context_signals[SET_CURSOR_LOCATION_RELATIVE],
+                       0,
+                       x,
+                       y,
+                       w,
+                       h);
     }
 }
 
@@ -1093,6 +1148,20 @@ _ic_set_surrounding_text (BusInputContext       *context,
     g_dbus_method_invocation_return_value (invocation, NULL);
 }
 
+/*
+ * Since IBusService is inherited by IBusImpl, this method cannot be
+ * applied to IBusServiceClass.method_call() directly but can be in
+ * each child class.method_call().
+ */
+static gboolean
+bus_input_context_service_authorized_method (IBusService     *service,
+                                             GDBusConnection *connection)
+{
+    if (ibus_service_get_connection (service) == connection)
+        return TRUE;
+    return FALSE;
+}
+
 /**
  * bus_input_context_service_method_call:
  *
@@ -1127,6 +1196,7 @@ bus_input_context_service_method_call (IBusService            *service,
     } methods [] =  {
         { "ProcessKeyEvent",   _ic_process_key_event },
         { "SetCursorLocation", _ic_set_cursor_location },
+        { "SetCursorLocationRelative", _ic_set_cursor_location_relative },
         { "ProcessHandWritingEvent",
                                _ic_process_hand_writing_event },
         { "CancelHandWriting", _ic_cancel_hand_writing },
@@ -1141,6 +1211,10 @@ bus_input_context_service_method_call (IBusService            *service,
     };
 
     gint i;
+
+    if (!bus_input_context_service_authorized_method (service, connection))
+        return;
+
     for (i = 0; i < G_N_ELEMENTS (methods); i++) {
         if (g_strcmp0 (method_name, methods[i].method_name) == 0) {
             methods[i].method_callback ((BusInputContext *)service, parameters, invocation);
@@ -1214,6 +1288,9 @@ bus_input_context_service_set_property (IBusService     *service,
                                   error);
     }
 
+    if (!bus_input_context_service_authorized_method (service, connection))
+        return FALSE;
+
     if (g_strcmp0 (property_name, "ContentType") == 0) {
         BusInputContext *context = (BusInputContext *) service;
         _ic_set_content_type (context, value);
@@ -1222,6 +1299,7 @@ bus_input_context_service_set_property (IBusService     *service,
 
     g_return_val_if_reached (FALSE);
 }
+
 
 gboolean
 bus_input_context_has_focus (BusInputContext *context)
@@ -1373,22 +1451,6 @@ bus_input_context_property_activate (BusInputContext *context,
     if (context->engine) {
         bus_engine_proxy_property_activate (context->engine, prop_name, prop_state);
     }
-}
-
-static void
-bus_input_context_commit_text (BusInputContext *context,
-                               IBusText        *text)
-{
-    g_assert (BUS_IS_INPUT_CONTEXT (context));
-
-    if (text == text_empty || text == NULL)
-        return;
-
-    GVariant *variant = ibus_serializable_serialize ((IBusSerializable *)text);
-    bus_input_context_emit_signal (context,
-                                   "CommitText",
-                                   g_variant_new ("(v)", variant),
-                                   NULL);
 }
 
 /**
@@ -2260,8 +2322,8 @@ static void set_engine_by_desc_data_free (SetEngineByDescData *data)
         g_object_unref (data->context);
     }
 
-    if (data->simple != NULL) {
-        g_object_unref (data->simple);
+    if (data->task != NULL) {
+        g_object_unref (data->task);
     }
 
     if (data->cancellable != NULL)
@@ -2291,17 +2353,16 @@ new_engine_cb (GObject             *obj,
     BusEngineProxy *engine = bus_engine_proxy_new_finish (res, &error);
 
     if (engine == NULL) {
-        g_simple_async_result_set_from_error (data->simple, error);
-        g_error_free (error);
+        g_task_return_error (data->task, error);
     }
     else {
         if (data->context->data != data) {
             /* Request has been overriden or cancelled */
             g_object_unref (engine);
-            g_simple_async_result_set_error (data->simple,
-                                             G_IO_ERROR,
-                                             G_IO_ERROR_CANCELLED,
-                                             "Opertation was cancelled");
+            g_task_return_new_error (data->task,
+                                     G_IO_ERROR,
+                                     G_IO_ERROR_CANCELLED,
+                                     "Opertation was cancelled");
         }
         else {
             /* Let BusEngineProxy call a Disable signal. */
@@ -2309,12 +2370,9 @@ new_engine_cb (GObject             *obj,
             bus_input_context_set_engine (data->context, engine);
             g_object_unref (engine);
             bus_input_context_enable (data->context);
-            g_simple_async_result_set_op_res_gboolean (data->simple, TRUE);
+            g_task_return_boolean (data->task, TRUE);
         }
     }
-
-    /* Call the callback function for bus_input_context_set_engine_by_desc(). */
-    g_simple_async_result_complete_in_idle (data->simple);
 
     set_engine_by_desc_data_free (data);
 }
@@ -2383,6 +2441,9 @@ bus_input_context_set_engine_by_desc (BusInputContext    *context,
                                       GAsyncReadyCallback callback,
                                       gpointer            user_data)
 {
+    GTask *task;
+    SetEngineByDescData *data;
+
     g_assert (BUS_IS_INPUT_CONTEXT (context));
     g_assert (IBUS_IS_ENGINE_DESC (desc));
     g_assert (cancellable == NULL || G_IS_CANCELLABLE (cancellable));
@@ -2398,27 +2459,23 @@ bus_input_context_set_engine_by_desc (BusInputContext    *context,
     if (callback == NULL)
         callback = (GAsyncReadyCallback) set_engine_by_desc_ready_cb;
 
-    GSimpleAsyncResult *simple =
-            g_simple_async_result_new ((GObject *) context,
-                                       callback,
-                                       user_data,
-                                       bus_input_context_set_engine_by_desc);
+    task = g_task_new (context, cancellable, callback, user_data);
+    g_task_set_source_tag (task, bus_input_context_set_engine_by_desc);
 
     if (g_cancellable_is_cancelled (cancellable)) {
-        g_simple_async_result_set_error (simple,
-                                         G_IO_ERROR,
-                                         G_IO_ERROR_CANCELLED,
-                                         "Operation was cancelled");
-        g_simple_async_result_complete_in_idle (simple);
-        g_object_unref (simple);
+        g_task_return_new_error (task,
+                                 G_IO_ERROR,
+                                 G_IO_ERROR_CANCELLED,
+                                 "Operation was cancelled");
+        g_object_unref (task);
         return;
     }
 
-    SetEngineByDescData *data = g_slice_new0 (SetEngineByDescData);
+    data = g_slice_new0 (SetEngineByDescData);
     context->data = data;
     data->context = context;
     g_object_ref (context);
-    data->simple = simple;
+    data->task = task;
 
     if (cancellable != NULL) {
         data->origin_cancellable = cancellable;
@@ -2445,13 +2502,22 @@ bus_input_context_set_engine_by_desc_finish (BusInputContext  *context,
                                              GAsyncResult     *res,
                                              GError          **error)
 {
-    GSimpleAsyncResult *simple = G_SIMPLE_ASYNC_RESULT (res);
+    GTask *task;
+    gboolean had_error;
 
     g_assert (BUS_IS_INPUT_CONTEXT (context));
-    g_assert (g_simple_async_result_get_source_tag (simple) ==
+    g_assert (g_task_is_valid (res, context));
+    task = G_TASK (res);
+    g_assert (g_task_get_source_tag (task) ==
                 bus_input_context_set_engine_by_desc);
 
-    if (g_simple_async_result_propagate_error (simple, error))
+    /* g_task_propagate_error() is not a public API and
+     * g_task_had_error() needs to be called before
+     * g_task_propagate_pointer() clears task->error.
+     */
+    had_error = g_task_had_error (task);
+    g_task_propagate_pointer (task, error);
+    if (had_error)
         return FALSE;
     return TRUE;
 }
@@ -2541,4 +2607,20 @@ bus_input_context_set_content_type (BusInputContext *context,
     value = g_variant_ref_sink (g_variant_new ("(uu)", purpose, hints));
     _ic_set_content_type (context, value);
     g_variant_unref (value);
+}
+
+void
+bus_input_context_commit_text (BusInputContext *context,
+                               IBusText        *text)
+{
+    g_assert (BUS_IS_INPUT_CONTEXT (context));
+
+    if (text == text_empty || text == NULL)
+        return;
+
+    GVariant *variant = ibus_serializable_serialize ((IBusSerializable *)text);
+    bus_input_context_emit_signal (context,
+                                   "CommitText",
+                                   g_variant_new ("(v)", variant),
+                                   NULL);
 }

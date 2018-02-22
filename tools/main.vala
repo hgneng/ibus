@@ -3,6 +3,7 @@
  * ibus - The Input Bus
  *
  * Copyright(c) 2013 Peng Huang <shawn.p.huang@gmail.com>
+ * Copyright(c) 2015-2017 Takao Fujiwara <takao.fujiwara1@gmail.com>
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -20,10 +21,15 @@
  * USA
  */
 
+private const string IBUS_SCHEMAS_GENERAL = "org.freedesktop.ibus.general";
+private const string IBUS_SCHEMAS_GENERAL_PANEL =
+        "org.freedesktop.ibus.general.panel";
+private const string IBUS_SCHEMAS_PANEL = "org.freedesktop.ibus.panel";
+
 private const string[] IBUS_SCHEMAS = {
-    "org.freedesktop.ibus.general",
-    "org.freedesktop.ibus.general.hotkey",
-    "org.freedesktop.ibus.panel",
+    IBUS_SCHEMAS_GENERAL,
+    IBUS_SCHEMAS_GENERAL_PANEL,
+    IBUS_SCHEMAS_PANEL,
 };
 
 bool name_only = false;
@@ -172,7 +178,11 @@ int get_set_engine(string[] argv) {
         return Posix.EXIT_FAILURE;
     }
 
-    return exec_setxkbmap(desc);
+    var settings = new GLib.Settings(IBUS_SCHEMAS_GENERAL);
+    if (!settings.get_boolean("use-system-keyboard-layout"))
+        return exec_setxkbmap(desc);
+
+    return Posix.EXIT_SUCCESS;
 }
 
 int message_watch(string[] argv) {
@@ -320,6 +330,32 @@ int reset_config(string[] argv) {
     return Posix.EXIT_SUCCESS;
 }
 
+#if EMOJI_DICT
+int emoji_dialog(string[] argv) {
+    string cmd = Config.LIBEXECDIR + "/ibus-ui-emojier";
+
+    var file = File.new_for_path(cmd);
+    if (!file.query_exists())
+        cmd = "../ui/gtk3/ibus-ui-emojier";
+
+    argv[0] = cmd;
+
+    string[] env = Environ.get();
+
+    try {
+        // Non-blocking
+        Process.spawn_async(null, argv, env,
+                            SpawnFlags.SEARCH_PATH,
+                            null, null);
+    } catch (SpawnError e) {
+        stderr.printf("%s\n", e.message);
+        return Posix.EXIT_FAILURE;
+    }
+
+    return Posix.EXIT_SUCCESS;
+}
+#endif
+
 int print_help(string[] argv) {
     print_usage(stdout);
     return Posix.EXIT_SUCCESS;
@@ -333,7 +369,7 @@ struct CommandEntry {
     unowned EntryFunc entry;
 }
 
-static const CommandEntry commands[]  = {
+const CommandEntry commands[]  = {
     { "engine", N_("Set or get engine"), get_set_engine },
     { "exit", N_("Exit ibus-daemon"), exit_daemon },
     { "list-engine", N_("Show available engines"), list_engine },
@@ -345,6 +381,9 @@ static const CommandEntry commands[]  = {
     { "address", N_("Print the D-Bus address of ibus-daemon"), print_address },
     { "read-config", N_("Show the configuration values"), read_config },
     { "reset-config", N_("Reset the configuration values"), reset_config },
+#if EMOJI_DICT
+    { "emoji", N_("Save emoji on dialog to clipboard "), emoji_dialog },
+#endif
     { "help", N_("Show this information"), print_help }
 };
 

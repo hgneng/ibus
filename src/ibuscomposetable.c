@@ -1,7 +1,7 @@
 /* -*- mode: C; c-basic-offset: 4; indent-tabs-mode: nil; -*- */
 /* ibus - The Input Bus
  * Copyright (C) 2013-2014 Peng Huang <shawn.p.huang@gmail.com>
- * Copyright (C) 2013-2015 Takao Fujiwara <takao.fujiwara1@gmail.com>
+ * Copyright (C) 2013-2017 Takao Fujiwara <takao.fujiwara1@gmail.com>
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -19,89 +19,80 @@
  * USA
  */
 
-/* If you copy libX11/nls/??/Compose.pre in xorg git HEAD to
- * /usr/share/X11/locale/??/Compose , need to convert:
- * # sed -e 's/^XCOMM/#/' -e 's|X11_LOCALEDATADIR|/usr/share/X11/locale|'
- *   Compose.pre > /usr/share/X11/locale/foo/Compose
- */
-
 #include <glib.h>
-#include <glib/gprintf.h>
+#include <glib/gstdio.h>
 #include <locale.h>
 #include <stdlib.h>
 #include <string.h>
-#include <strings.h>
 
+#include "ibuscomposetable.h"
 #include "ibuserror.h"
+#include "ibusenginesimple.h"
 #include "ibuskeys.h"
 #include "ibuskeysyms.h"
-#include "ibuscomposetable.h"
 #include "ibustypes.h"
 
-#define IS_DEAD_KEY(k) \
-    ((k) >= IBUS_KEY_dead_grave && (k) <= (IBUS_KEY_dead_dasia + 1))
+#include "ibusenginesimpleprivate.h"
 
-int MAX_COMPOSE_LEN = 0;
-int N_INDEX_STRIDE = 0;
+#define IBUS_COMPOSE_TABLE_MAGIC "IBusComposeTable"
+#define IBUS_COMPOSE_TABLE_VERSION (2)
+
+typedef struct {
+  gunichar     *sequence;
+  gunichar      value[2];
+  gchar        *comment;
+} IBusComposeData;
+
+static void
+ibus_compose_data_free (IBusComposeData *compose_data)
+{
+    g_free (compose_data->sequence);
+    g_free (compose_data->comment);
+    g_slice_free (IBusComposeData, compose_data);
+}
+
+static void
+ibus_compose_list_element_free (IBusComposeData *compose_data,
+                                gpointer         data)
+{
+    ibus_compose_data_free (compose_data);
+}
 
 static gboolean
 is_codepoint (const gchar *str)
 {
-    gboolean retval = (strlen (str) > 1 && *str == 'U');
     int i;
 
-    if (!retval)
+    /* 'U' is not code point but 'U00C0' is code point */
+    if (str[0] == '\0' || str[0] != 'U' || str[1] == '\0')
         return FALSE;
 
     for (i = 1; str[i] != '\0'; i++) {
-        if (g_ascii_isxdigit (str[i]))
-            continue;
-        else
+        if (!g_ascii_isxdigit (str[i]))
             return FALSE;
     }
 
     return TRUE;
 }
 
-static guint32
-get_codepoint (const gchar *str)
-{
-    if (g_str_has_prefix (str, "IBUS_KEY_"))
-        return (guint32) ibus_keyval_from_name (str + 9);
-    if (*str == '0' && *(str + 1) == '\0')
-        return 0;
-    if (*str == '0' && *(str + 1) == 'x')
-        return (guint32) g_ascii_strtoll (str, NULL, 16);
-
-    g_assert_not_reached ();
-    return 0;
-}
-
 static gboolean
-parse_compose_value (GArray *array, const gchar *val, GError **error)
+parse_compose_value (IBusComposeData  *compose_data,
+                     const gchar      *val,
+                     const gchar      *line)
 {
     gchar **words = g_strsplit (val, "\"", 3);
-    gchar *result;
     gunichar uch;
 
     if (g_strv_length (words) < 3) {
-        g_set_error (error,
-                     IBUS_ERROR,
-                     IBUS_ERROR_FAILED,
-                     "Need to double-quote the value: %s", val);
-        g_strfreev (words);
-        return FALSE;
+        g_warning ("Need to double-quote the value: %s: %s", val, line);
+        goto fail;
     }
 
     uch = g_utf8_get_char (words[1]);
 
     if (uch == 0) {
-        g_set_error (error,
-                     IBUS_ERROR,
-                     IBUS_ERROR_FAILED,
-                     "Invalid value: %s", val);
-        g_strfreev (words);
-        return FALSE;
+        g_warning ("Invalid value: %s: %s", val, line);
+        goto fail;
     }
     else if (uch == '\\') {
         uch = words[1][1];
@@ -111,109 +102,105 @@ parse_compose_value (GArray *array, const gchar *val, GError **error)
             uch = '"';
         /* The escaped octal */
         else if (uch >= '0' && uch <= '8')
-            uch = g_ascii_strtoll(words[1] + 1, 0, 8);
+            uch = g_ascii_strtoll(words[1] + 1, NULL, 8);
         /* If we need to handle other escape sequences. */
         else if (uch != '\\')
             g_assert_not_reached ();
     }
-    else if (g_utf8_get_char (g_utf8_next_char (words[1])) > 0) {
-        g_set_error (error,
-                     IBUS_ERROR,
-                     IBUS_ERROR_FAILED,
-                     "GTK+ supports to output one char only: %s", val);
-        g_strfreev (words);
-        return FALSE;
+
+    if (g_utf8_get_char (g_utf8_next_char (words[1])) > 0) {
+        g_warning ("GTK+ supports to output one char only: %s: %s", val, line);
+        goto fail;
     }
 
-
-    result = g_strdup_printf ("0x%08X", uch);
-    g_array_append_val (array, result);
+    compose_data->value[1] = uch;
 
     if (uch == '"')
-        result = g_strdup (g_strstrip (words[2] + 1));
+        compose_data->comment = g_strdup (g_strstrip (words[2] + 1));
     else
-        result = g_strdup (g_strstrip (words[2]));
+        compose_data->comment = g_strdup (g_strstrip (words[2]));
 
-    g_array_append_val (array, result);
     g_strfreev (words);
 
     return TRUE;
+
+fail:
+    g_strfreev (words);
+    return FALSE;
 }
 
 static gboolean
-parse_compose_sequence (GArray *array, const gchar *seq, GError **error)
+parse_compose_sequence (IBusComposeData *compose_data,
+                        const gchar     *seq,
+                        const gchar     *line)
 {
     gchar **words = g_strsplit (seq, "<", -1);
-    gchar *result;
     int i;
     int n = 0;
 
     if (g_strv_length (words) < 2) {
-        g_set_error (error,
-                     IBUS_ERROR,
-                     IBUS_ERROR_FAILED,
-                     "key sequence format is <a> <b>...");
-        g_strfreev (words);
-        return FALSE;
+        g_warning ("key sequence format is <a> <b>...: %s", line);
+        goto fail;
     }
 
     for (i = 1; words[i] != NULL; i++) {
         gchar *start = words[i];
         gchar *end = index (words[i], '>');
         gchar *match;
+        gunichar codepoint;
 
         if (words[i][0] == '\0')
              continue;
 
         if (start == NULL || end == NULL || end <= start) {
-            g_set_error (error,
-                         IBUS_ERROR,
-                         IBUS_ERROR_FAILED,
-                         "key sequence format is <a> <b>...");
-            g_strfreev (words);
-            return FALSE;
+            g_warning ("key sequence format is <a> <b>...: %s", line);
+            goto fail;
         }
 
         match = g_strndup (start, end - start);
 
-        if (is_codepoint (match)) {
-            gint64 code = g_ascii_strtoll (match + 1, NULL, 16);
-            result = g_strdup_printf ("0x%04X", (unsigned int) code);
-        } else
-            result = g_strdup_printf ("IBUS_KEY_%s", match);
+        if (compose_data->sequence == NULL)
+            compose_data->sequence = g_malloc (sizeof (gunichar) * 2);
+        else
+            compose_data->sequence = g_realloc (compose_data->sequence,
+                                                sizeof (gunichar) * (n + 2));
 
+        if (is_codepoint (match)) {
+            codepoint = (gunichar) g_ascii_strtoll (match + 1, NULL, 16);
+            compose_data->sequence[n] = codepoint;
+            compose_data->sequence[n + 1] = 0;
+        } else {
+            codepoint = (gunichar) ibus_keyval_from_name (match);
+            compose_data->sequence[n] = codepoint;
+            compose_data->sequence[n + 1] = 0;
+        }
+
+        if (codepoint == IBUS_KEY_VoidSymbol)
+            g_warning ("Could not get code point of keysym %s", match);
         g_free (match);
-        g_array_append_val (array, result);
         n++;
     }
 
     g_strfreev (words);
     if (0 == n || n >= IBUS_MAX_COMPOSE_LEN) {
-        g_set_error (error,
-                     IBUS_ERROR,
-                     IBUS_ERROR_FAILED,
-                     "The max number of sequences is %d", IBUS_MAX_COMPOSE_LEN);
+        g_warning ("The max number of sequences is %d: %s",
+                   IBUS_MAX_COMPOSE_LEN, line);
         return FALSE;
     }
 
-    result = g_strdup ("0");
-    g_array_append_val (array, result);
     return TRUE;
+
+fail:
+    g_strfreev (words);
+    return FALSE;
 }
 
 static void
-clear_char_array (gpointer data)
-{
-    gchar **array = data;
-    g_free (*array);
-}
-
-static void
-parse_compose_line (GList **compose_list, const gchar *line)
+parse_compose_line (GList       **compose_list,
+                    const gchar  *line)
 {
     gchar **components = NULL;
-    GArray *array;
-    GError *error = NULL;
+    IBusComposeData *compose_data = NULL;
 
     if (line[0] == '\0' || line[0] == '#')
         return;
@@ -225,36 +212,34 @@ parse_compose_line (GList **compose_list, const gchar *line)
 
     if (components[1] == NULL) {
         g_warning ("No delimiter ':': %s", line);
-        g_strfreev (components);
-        return;
+        goto fail;
     }
 
-    array = g_array_new (TRUE, TRUE, sizeof (gchar *));
-    g_array_set_clear_func (array, clear_char_array);
+    compose_data = g_slice_new0 (IBusComposeData);
 
-    if (!parse_compose_sequence (array, g_strstrip (components[0]), &error)) {
-        g_warning ("%s: %s", error->message, line);
-        g_clear_error (&error);
-        g_strfreev (components);
-        g_array_unref (array);
-        return;
+    if (!parse_compose_sequence (compose_data,
+                                 g_strstrip (components[0]),
+                                 line)) {
+        goto fail;
     }
 
-    if (!parse_compose_value (array, g_strstrip (components[1]), &error)) {
-        g_warning ("%s: %s", error->message, line);
-        g_clear_error (&error);
-        g_strfreev (components);
-        g_array_unref (array);
-        return;
-    }
+    if (!parse_compose_value (compose_data, g_strstrip (components[1]), line))
+        goto fail;
 
     g_strfreev (components);
 
-    *compose_list = g_list_append (*compose_list, array);
+    *compose_list = g_list_append (*compose_list, compose_data);
+
+    return;
+
+fail:
+    g_strfreev (components);
+    if (compose_data)
+        ibus_compose_data_free (compose_data);
 }
 
 static GList *
-parse_compose_file (const gchar *compose_file)
+ibus_compose_list_parse_file (const gchar *compose_file)
 {
     gchar *contents = NULL;
     gchar **lines = NULL;
@@ -266,6 +251,7 @@ parse_compose_file (const gchar *compose_file)
     if (!g_file_get_contents (compose_file, &contents, &length, &error)) {
         g_error ("%s", error->message);
         g_error_free (error);
+        return NULL;
     }
 
     lines = g_strsplit (contents, "\n", -1);
@@ -277,288 +263,55 @@ parse_compose_file (const gchar *compose_file)
     return compose_list;
 }
 
-static int
-compare_seq_index (const void *key, const void *value)
-{
-    const guint16 *keysyms = key;
-    const guint16 *seq = value;
-
-    if (keysyms[0] < seq[0])
-        return -1;
-    else if (keysyms[0] > seq[0])
-        return 1;
-    return 0;
-}
-
-static int
-compare_seq (const void *key, const void *value)
-{
-    int i = 0;
-    const guint16 *keysyms = key;
-    const guint16 *seq = value;
-
-    while (keysyms[i]) {
-        if (keysyms[i] < seq[i])
-            return -1;
-        else if (keysyms[i] > seq[i])
-            return 1;
-
-        i++;
-    }
-
-    return 0;
-}
-
-/* Implement check_compact_table() in ibus/src/ibusenginesimple.c
- */
-static gboolean
-check_compact_table (const guint16                 *compose_buffer,
-                     const IBusComposeTableCompact *table,
-                     gint                           n_compose)
-{
-    gint row_stride;
-    guint16 *seq_index;
-    guint16 *seq;
-    gint i;
-
-    seq_index = bsearch (compose_buffer,
-                         table->data,
-                         table->n_index_size,
-                         sizeof (guint16) *  table->n_index_stride,
-                         compare_seq_index);
-
-    if (seq_index == NULL) {
-        // g_debug ("compact: no\n");
-        return FALSE;
-    }
-
-    seq = NULL;
-    i = n_compose - 1;
-
-    if (i >= table->max_seq_len) {
-        return FALSE;
-    }
-
-    row_stride = i + 1;
-
-    if (seq_index[i + 1] <= seq_index[i]) {
-        return FALSE;
-    }
-
-    seq = bsearch (compose_buffer + 1,
-                   table->data + seq_index[i],
-                   (seq_index[i + 1] - seq_index[i]) / row_stride,
-                   sizeof (guint16) * row_stride,
-                   compare_seq);
-    // g_debug ("seq = %p", seq);
-
-    if (!seq) {
-        // g_debug ("no\n");
-        return FALSE;
-    }
-    else {
-        gunichar value = seq[row_stride - 1];
-        // g_debug ("U+%04X\n", value);
-        if (compose_buffer[n_compose + 1] == value)
-            return TRUE;
-        else
-            return FALSE;
-    }
-}
-
-static gboolean
-check_normalize_nfc (gunichar* combination_buffer, gint n_compose)
-{
-    gunichar combination_buffer_temp[IBUS_MAX_COMPOSE_LEN];
-    gchar *combination_utf8_temp = NULL;
-    gchar *nfc_temp = NULL;
-    gint n_combinations;
-    gunichar temp_swap;
-    gint i;
-
-    n_combinations = 1;
-
-    for (i = 1; i < n_compose; i++ )
-        n_combinations *= i;
-
-    if (combination_buffer[0] >= 0x390 && combination_buffer[0] <= 0x3FF) {
-        for (i = 1; i < n_compose; i++ )
-            if (combination_buffer[i] == 0x303)
-                combination_buffer[i] = 0x342;
-    }
-
-    memcpy (combination_buffer_temp, combination_buffer,
-            IBUS_MAX_COMPOSE_LEN * sizeof (gunichar) );
-
-    for (i = 0; i < n_combinations; i++ ) {
-        g_unicode_canonical_ordering (combination_buffer_temp, n_compose);
-        combination_utf8_temp = g_ucs4_to_utf8 (combination_buffer_temp,
-                                                -1, NULL, NULL, NULL);
-        nfc_temp = g_utf8_normalize (combination_utf8_temp, -1,
-                                     G_NORMALIZE_NFC);
-
-        if (g_utf8_strlen (nfc_temp, -1) == 1) {
-            memcpy (combination_buffer,
-                    combination_buffer_temp,
-                    IBUS_MAX_COMPOSE_LEN * sizeof (gunichar) );
-
-            g_free (combination_utf8_temp);
-            g_free (nfc_temp);
-
-            return TRUE;
-        }
-
-        g_free (combination_utf8_temp);
-        g_free (nfc_temp);
-
-        if (n_compose > 2) {
-            temp_swap = combination_buffer_temp[i % (n_compose - 1) + 1];
-            combination_buffer_temp[i % (n_compose - 1) + 1] =
-             combination_buffer_temp[(i+1) % (n_compose - 1) + 1];
-            combination_buffer_temp[(i+1) % (n_compose - 1) + 1] = temp_swap;
-        }
-        else
-            break;
-    }
-
-  return FALSE;
-}
-
-/* Implement check_algorithmically() in ibus/src/ibusenginesimple.c
- */
-static gboolean
-check_algorithmically (const guint16 *compose_buffer,
-                       gint          n_compose)
-{
-    int i = 0;
-    gunichar combination_buffer[IBUS_MAX_COMPOSE_LEN];
-    gchar *combination_utf8, *nfc;
-
-    if (n_compose >= IBUS_MAX_COMPOSE_LEN)
-        return FALSE;
-
-    for (i = 0; i < n_compose && IS_DEAD_KEY (compose_buffer[i]); i++)
-        ;
-    if (i == n_compose)
-        return FALSE;
-
-    if (i > 0 && i == n_compose - 1) {
-        combination_buffer[0] =
-                ibus_keyval_to_unicode ((guint) compose_buffer[i]);
-        combination_buffer[n_compose] = 0;
-        i--;
-
-        while (i >= 0) {
-            switch (compose_buffer[i]) {
-#define CASE(keysym, unicode) \
-            case IBUS_KEY_dead_##keysym: combination_buffer[i+1] = unicode; \
-            break
-
-            CASE (grave, 0x0300);
-            CASE (acute, 0x0301);
-            CASE (circumflex, 0x0302);
-            CASE (tilde, 0x0303);
-            CASE (macron, 0x0304);
-            CASE (breve, 0x0306);
-            CASE (abovedot, 0x0307);
-            CASE (diaeresis, 0x0308);
-            CASE (hook, 0x0309);
-            CASE (abovering, 0x030A);
-            CASE (doubleacute, 0x030B);
-            CASE (caron, 0x030C);
-            CASE (abovecomma, 0x0313);
-            CASE (abovereversedcomma, 0x0314);
-            CASE (horn, 0x031B);
-            CASE (belowdot, 0x0323);
-            CASE (cedilla, 0x0327);
-            CASE (ogonek, 0x0328);
-            CASE (iota, 0x0345);
-            CASE (voiced_sound, 0x3099);
-            CASE (semivoiced_sound, 0x309A);
-
-            /* The following cases are to be removed once xkeyboard-config,
-             * xorg are fully updated.
-             */
-            /* Workaround for typo in 1.4.x xserver-xorg */
-            case 0xfe66: combination_buffer[i+1] = 0x314; break;
-            /* CASE (dasia, 0x314); */
-            /* CASE (perispomeni, 0x342); */
-            /* CASE (psili, 0x343); */
-#undef CASE
-            default:
-                combination_buffer[i+1] =
-                        ibus_keyval_to_unicode ((guint) compose_buffer[i]);
-            }
-            i--;
-        }
-
-        if (check_normalize_nfc (combination_buffer, n_compose)) {
-            gunichar value;
-
-            combination_utf8 = g_ucs4_to_utf8 (combination_buffer,
-                                               -1, NULL, NULL, NULL);
-            nfc = g_utf8_normalize (combination_utf8, -1, G_NORMALIZE_NFC);
-
-            value = g_utf8_get_char (nfc);
-            g_free (combination_utf8);
-            g_free (nfc);
-
-            if (compose_buffer[n_compose + 1] == value)
-                return TRUE;
-        }
-    }
-
-    return FALSE;
-}
-
 static GList *
-check_duplicated_compose (GList *compose_list)
+ibus_compose_list_check_duplicated (GList *compose_list)
 {
     GList *list;
     GList *removed_list = NULL;
+    IBusComposeData *compose_data;
 
     for (list = compose_list; list != NULL; list = list->next) {
-        GArray *array = (GArray *) list->data;
-        static guint16 keysyms[IBUS_MAX_COMPOSE_LEN + 2];
+        static guint16 keysyms[IBUS_MAX_COMPOSE_LEN + 1];
         int i;
         int n_compose = 0;
+        gboolean compose_finish;
+        gunichar output_char;
 
-        for (i = 0; i < IBUS_MAX_COMPOSE_LEN + 2; i++) {
+        compose_data = list->data;
+
+        for (i = 0; i < IBUS_MAX_COMPOSE_LEN + 1; i++)
             keysyms[i] = 0;
-        }
 
-        for (i = 0; i < array->len; i++) {
-            const gchar *data = g_array_index (array, const gchar *, i);
-            guint32 codepoint = get_codepoint (data);
+        for (i = 0; i < IBUS_MAX_COMPOSE_LEN + 1; i++) {
+            gunichar codepoint = compose_data->sequence[i];
             keysyms[i] = (guint16) codepoint;
-            if (codepoint == IBUS_KEY_VoidSymbol)
-                g_warning ("Could not get code point of keysym %s", data);
 
-            if (codepoint == 0) {
-                data = g_array_index (array, const gchar *, i + 1);
-                codepoint = get_codepoint (data);
-                keysyms[i + 1] = (guint16) codepoint;
-                if (codepoint == IBUS_KEY_VoidSymbol)
-                    g_warning ("Could not get code point of keysym %s", data);
+            if (codepoint == 0)
                 break;
-            }
 
             n_compose++;
         }
 
-        if (check_compact_table (keysyms,
-                                 &ibus_compose_table_compact,
-                                 n_compose))
-            removed_list = g_list_append (removed_list, array);
+        if (ibus_check_compact_table (&ibus_compose_table_compact,
+                                      keysyms,
+                                      n_compose,
+                                      &compose_finish,
+                                      &output_char) && compose_finish) {
+            if (compose_data->value[1] == output_char)
+                removed_list = g_list_append (removed_list, compose_data);
 
-        else if (check_algorithmically (keysyms, n_compose))
-            removed_list = g_list_append (removed_list, array);
+        } else if (ibus_check_algorithmically (keysyms,
+                                               n_compose,
+                                               &output_char)) {
+            if (compose_data->value[1] == output_char)
+                removed_list = g_list_append (removed_list, compose_data);
+        }
     }
 
     for (list = removed_list; list != NULL; list = list->next) {
-        GArray *array = (GArray *) list->data;
-        compose_list = g_list_remove (compose_list, array);
-        g_array_unref (array);
+        compose_data = list->data;
+        compose_list = g_list_remove (compose_list, compose_data);
+        ibus_compose_data_free (compose_data);
     }
 
     g_list_free (removed_list);
@@ -567,33 +320,33 @@ check_duplicated_compose (GList *compose_list)
 }
 
 static GList *
-check_uint16 (GList *compose_list)
+ibus_compose_list_check_uint16 (GList *compose_list)
 {
     GList *list;
     GList *removed_list = NULL;
+    IBusComposeData *compose_data;
 
     for (list = compose_list; list != NULL; list = list->next) {
-        GArray *array = (GArray *) list->data;
         int i;
 
-        for (i = 0; i < array->len; i++) {
-            const gchar *data = g_array_index (array, const gchar *, i);
-            guint32 codepoint = get_codepoint (data);
+        compose_data = list->data;
+        for (i = 0; i < IBUS_MAX_COMPOSE_LEN; i++) {
+            gunichar codepoint = compose_data->sequence[i];
 
             if (codepoint == 0)
                 break;
 
             if (codepoint > 0xffff) {
-                removed_list = g_list_append (removed_list, array);
+                removed_list = g_list_append (removed_list, compose_data);
                 break;
             }
         }
     }
 
     for (list = removed_list; list != NULL; list = list->next) {
-        GArray *array = (GArray *) list->data;
-        compose_list = g_list_remove (compose_list, array);
-        g_array_unref (array);
+        compose_data = list->data;
+        compose_list = g_list_remove (compose_list, compose_data);
+        ibus_compose_data_free (compose_data);
     }
 
     g_list_free (removed_list);
@@ -602,88 +355,58 @@ check_uint16 (GList *compose_list)
 }
 
 static GList *
-format_for_gtk (GList *compose_list)
+ibus_compose_list_format_for_gtk (GList *compose_list,
+                                  int   *p_max_compose_len,
+                                  int   *p_n_index_stride)
 {
     GList *list;
-    GList *new_list = NULL;
+    IBusComposeData *compose_data;
+    int max_compose_len = 0;
     int i;
-    int j;
+    gunichar codepoint;
 
     for (list = compose_list; list != NULL; list = list->next) {
-        GArray *array = (GArray *) list->data;
+        compose_data = list->data;
 
-        for (i = 0; i < array->len; i++) {
-            const gchar *data = g_array_index (array, const gchar *, i);
-            guint32 codepoint = get_codepoint (data);
-
+        for (i = 0; i < IBUS_MAX_COMPOSE_LEN + 1; i++) {
+            codepoint = compose_data->sequence[i];
             if (codepoint == 0) {
-                if (MAX_COMPOSE_LEN < i)
-                    MAX_COMPOSE_LEN = i;
+                if (max_compose_len < i)
+                    max_compose_len = i;
                 break;
             }
         }
     }
 
-    N_INDEX_STRIDE = MAX_COMPOSE_LEN + 2;
+    if (p_max_compose_len)
+        *p_max_compose_len = max_compose_len;
+    if (p_n_index_stride)
+        *p_n_index_stride = max_compose_len + 2;
 
     for (list = compose_list; list != NULL; list = list->next) {
-        GArray *array = (GArray *) list->data;
-        for (i = 0; i < array->len; i++) {
-            const gchar *data = g_array_index (array, const gchar *, i);
-            guint32 codepoint = get_codepoint (data);
-
-            if (codepoint == 0) {
-                gchar *value = g_strdup (g_array_index (array, const gchar *,
-                                                        i + 1));
-                gchar *comment = g_strdup (g_array_index (array, const gchar *,
-                                                          i + 2));
-                gchar *result;
-
-                g_array_remove_range (array, i, array->len - i);
-
-                for (j = i; j < MAX_COMPOSE_LEN; j++) {
-                    result = g_strdup ("0");
-                    g_array_append_val (array, result);
-                }
-
-                codepoint = get_codepoint (value);
-                g_free (value);
-
-                if (codepoint > 0xffff) {
-                    result = g_strdup_printf ("0x%04X", codepoint / 0x10000);
-                    g_array_append_val (array, result);
-                    result = g_strdup_printf ("0x%04X",
-                            codepoint - codepoint / 0x10000 * 0x10000);
-                    g_array_append_val (array, result);
-                } else {
-                    result = g_strdup ("0");
-                    g_array_append_val (array, result);
-                    result = g_strdup_printf ("0x%04X", codepoint);
-                    g_array_append_val (array, result);
-                }
-
-                g_array_append_val (array, comment);
-                new_list = g_list_append (new_list, array);
-                break;
-            }
+        compose_data = list->data;
+        codepoint = compose_data->value[1];
+        if (codepoint > 0xffff) {
+            compose_data->value[0] = codepoint / 0x10000;
+            compose_data->value[1] = codepoint - codepoint / 0x10000 * 0x10000;
         }
     }
 
-    g_list_free (compose_list);
-    return new_list;
+    return compose_list;
 }
 
 static gint
-compare_array (gpointer a, gpointer b)
+ibus_compose_data_compare (gpointer a,
+                           gpointer b,
+                           gpointer data)
 {
-    GArray *array_a = (GArray *) a;
-    GArray *array_b = (GArray *) b;
+    IBusComposeData *compose_data_a = a;
+    IBusComposeData *compose_data_b = b;
+    int max_compose_len = GPOINTER_TO_INT (data);
     int i;
-    for (i = 0; i < MAX_COMPOSE_LEN; i++) {
-        const gchar *data_a = g_array_index (array_a, const gchar *, i);
-        const gchar *data_b = g_array_index (array_b, const gchar *, i);
-        guint32 code_a = get_codepoint (data_a);
-        guint32 code_b = get_codepoint (data_b);
+    for (i = 0; i < max_compose_len; i++) {
+        gunichar code_a = compose_data_a->sequence[i];
+        gunichar code_b = compose_data_b->sequence[i];
 
         if (code_a != code_b)
             return code_a - code_b;
@@ -692,56 +415,343 @@ compare_array (gpointer a, gpointer b)
 }
 
 static void
-print_compose_list (GList *compose_list)
+ibus_compose_list_print (GList *compose_list,
+                         int    max_compose_len,
+                         int    n_index_stride)
 {
     GList *list;
-    int i;
-    int TOTAL_SIZE = 0;
+    int i, j;
+    IBusComposeData *compose_data;
+    int total_size = 0;
+    gunichar upper;
+    gunichar lower;
+    const gchar *comment;
+    const gchar *keyval;
 
     for (list = compose_list; list != NULL; list = list->next) {
-        GArray *array = (GArray *) list->data;
-        const gchar *data;
-        const gchar *upper;
-        const gchar *lower;
-        const gchar *comment;
-
-        g_assert (array->len >= MAX_COMPOSE_LEN + 2);
-
+        compose_data = list->data;
         g_printf ("  ");
-        for (i = 0; i < MAX_COMPOSE_LEN; i++) {
-            data = g_array_index (array, const gchar *, i);
 
-            if (i == MAX_COMPOSE_LEN -1)
-                g_printf ("%s,\n", data);
+        for (i = 0; i < max_compose_len; i++) {
+
+            if (compose_data->sequence[i] == 0) {
+                for (j = i; j < max_compose_len; j++) {
+                    if (i == max_compose_len -1)
+                        g_printf ("0,\n");
+                    else
+                        g_printf ("0, ");
+                }
+                break;
+            }
+
+            keyval = ibus_keyval_name (compose_data->sequence[i]);
+            if (i == max_compose_len -1)
+                g_printf ("%s,\n", keyval ? keyval : "(null)");
             else
-                g_printf ("%s, ", data);
+                g_printf ("%s, ", keyval ? keyval : "(null)");
         }
-        upper = g_array_index (array, const gchar *, i);
-        lower = g_array_index (array, const gchar *, i + 1);
-        comment = g_array_index (array, const gchar *, i + 2);
+        upper = compose_data->value[0];
+        lower = compose_data->value[1];
+        comment = compose_data->comment;
 
         if (list == g_list_last (compose_list))
-            g_printf ("    %s, %s  /* %s */\n", upper, lower, comment);
+            g_printf ("    %#06X, %#06X  /* %s */\n", upper, lower, comment);
         else
-            g_printf ("    %s, %s, /* %s */\n", upper, lower, comment);
+            g_printf ("    %#06X, %#06X, /* %s */\n", upper, lower, comment);
 
-        TOTAL_SIZE += N_INDEX_STRIDE;
+        total_size += n_index_stride;
     }
 
     g_printerr ("TOTAL_SIZE: %d\nMAX_COMPOSE_LEN: %d\nN_INDEX_STRIDE: %d\n",
-                TOTAL_SIZE, MAX_COMPOSE_LEN, N_INDEX_STRIDE);
+                total_size, max_compose_len, n_index_stride);
+}
+
+/* Implemented from g_str_hash() */
+static guint32
+ibus_compose_table_data_hash (gconstpointer v,
+                              int           length)
+{
+    const guint16 *p, *head;
+    unsigned char c;
+    guint32 h = 5381;
+
+    for (p = v, head = v; (p - head) < length; p++) {
+        c = 0x00ff & (*p >> 8);
+        h = (h << 5) + h + c;
+        c = 0x00ff & *p;
+        h = (h << 5) + h + c;
+    }
+
+    return h;
+}
+
+static gchar *
+ibus_compose_hash_get_cache_path (guint32 hash)
+{
+    gchar *basename = NULL;
+    gchar *dir = NULL;
+    gchar *path = NULL;
+
+    basename = g_strdup_printf ("%08x.cache", hash);
+
+    dir = g_build_filename (g_get_user_cache_dir (),
+                            "ibus", "compose", NULL);
+    path = g_build_filename (dir, basename, NULL);
+    if (g_mkdir_with_parents (dir, 0755) != 0) {
+        g_warning ("Failed to mkdir %s", dir);
+        g_free (path);
+        path = NULL;
+    }
+
+    g_free (dir);
+    g_free (basename);
+
+    return path;
+}
+
+static GVariant *
+ibus_compose_table_serialize (IBusComposeTable *compose_table)
+{
+    const gchar *header = IBUS_COMPOSE_TABLE_MAGIC;
+    const guint16 version = IBUS_COMPOSE_TABLE_VERSION;
+    guint16 max_seq_len;
+    guint16 index_stride;
+    guint16 n_seqs;
+    GVariant *variant_data;
+    GVariant *variant_table;
+
+    g_return_val_if_fail (compose_table != NULL, NULL);
+    g_return_val_if_fail (compose_table->data != NULL, NULL);
+
+    max_seq_len = compose_table->max_seq_len;
+    index_stride = max_seq_len + 2;
+    n_seqs = compose_table->n_seqs;
+
+    g_return_val_if_fail (max_seq_len > 0, NULL);
+    g_return_val_if_fail (n_seqs > 0, NULL);
+
+    variant_data = g_variant_new_fixed_array (G_VARIANT_TYPE_UINT16,
+                                              compose_table->data,
+                                              index_stride * n_seqs,
+                                              sizeof (guint16));
+    if (variant_data == NULL) {
+        g_warning ("Could not change compose data to GVariant.");
+        return NULL;
+    }
+    variant_table = g_variant_new ("(sqqqv)",
+                                   header,
+                                   version,
+                                   max_seq_len,
+                                   n_seqs,
+                                   variant_data);
+    return g_variant_ref_sink (variant_table);
+}
+
+static gint
+ibus_compose_table_find (gconstpointer data1,
+                         gconstpointer data2)
+{
+    const IBusComposeTable *compose_table = (const IBusComposeTable *) data1;
+    guint32 hash = (guint32) GPOINTER_TO_INT (data2);
+    return compose_table->id != hash;
 }
 
 static IBusComposeTable *
-ibus_compose_table_new_with_list (GList *compose_list,
-                                  int    max_compose_len,
-                                  int    n_index_stride)
+ibus_compose_table_deserialize (const gchar *contents,
+                                gsize        length)
+{
+    IBusComposeTable *retval = NULL;
+    GVariantType *type;
+    GVariant *variant_data = NULL;
+    GVariant *variant_table = NULL;
+    const gchar *header = NULL;
+    guint16 version = 0;
+    guint16 max_seq_len = 0;
+    guint16 n_seqs = 0;
+    guint16 index_stride;
+    gconstpointer data = NULL;
+    gsize data_length = 0;
+
+    g_return_val_if_fail (contents != NULL, NULL);
+    g_return_val_if_fail (length > 0, NULL);
+
+    /* Check the cache version at first before load whole the file content. */
+    type = g_variant_type_new ("(sq)");
+    variant_table = g_variant_new_from_data (type,
+                                             contents,
+                                             length,
+                                             FALSE,
+                                             NULL,
+                                             NULL);
+    g_variant_type_free (type);
+
+    if (variant_table == NULL) {
+        g_warning ("cache is broken.");
+        goto out_load_cache;
+    }
+
+    g_variant_ref_sink (variant_table);
+    g_variant_get (variant_table, "(&sq)", &header, &version);
+
+    if (g_strcmp0 (header, IBUS_COMPOSE_TABLE_MAGIC) != 0) {
+        g_warning ("cache is not IBusComposeTable.");
+        goto out_load_cache;
+    }
+
+    if (version != IBUS_COMPOSE_TABLE_VERSION) {
+        g_warning ("cache version is different: %u != %u",
+                   version, IBUS_COMPOSE_TABLE_VERSION);
+        goto out_load_cache;
+    }
+
+    version = 0;
+    header = NULL;
+    g_variant_unref (variant_table);
+    variant_table = NULL;
+
+    type = g_variant_type_new ("(sqqqv)");
+    variant_table = g_variant_new_from_data (type,
+                                             contents,
+                                             length,
+                                             FALSE,
+                                             NULL,
+                                             NULL);
+    g_variant_type_free (type);
+
+    if (variant_table == NULL) {
+        g_warning ("cache is broken.");
+        goto out_load_cache;
+    }
+
+    g_variant_ref_sink (variant_table);
+    g_variant_get (variant_table, "(&sqqqv)",
+                   NULL,
+                   NULL,
+                   &max_seq_len,
+                   &n_seqs,
+                   &variant_data);
+
+    if (max_seq_len == 0 || n_seqs == 0) {
+        g_warning ("cache size is not correct %d %d", max_seq_len, n_seqs);
+        goto out_load_cache;
+    }
+
+    data = g_variant_get_fixed_array (variant_data,
+                                      &data_length,
+                                      sizeof (guint16));
+    index_stride = max_seq_len + 2;
+
+    if (data == NULL) {
+        g_warning ("cache data is null.");
+        goto out_load_cache;
+    }
+    if (data_length != (gsize) index_stride * n_seqs) {
+        g_warning ("cache size is not correct %d %d %lu",
+                   max_seq_len, n_seqs, data_length);
+        goto out_load_cache;
+    }
+
+    retval = g_new0 (IBusComposeTable, 1);
+    retval->data = g_new (guint16, data_length);
+    memcpy (retval->data, data, data_length * sizeof (guint16));
+    retval->max_seq_len = max_seq_len;
+    retval->n_seqs = n_seqs;
+
+
+out_load_cache:
+    if (variant_data)
+        g_variant_unref (variant_data);
+    if (variant_table)
+        g_variant_unref (variant_table);
+    return retval;
+}
+
+static IBusComposeTable *
+ibus_compose_table_load_cache (const gchar *compose_file)
+{
+    IBusComposeTable *retval = NULL;
+    guint32 hash;
+    gchar *path = NULL;
+    gchar *contents = NULL;
+    GStatBuf original_buf;
+    GStatBuf cache_buf;
+    gsize length = 0;
+    GError *error = NULL;
+
+    do {
+        hash = g_str_hash (compose_file);
+        if ((path = ibus_compose_hash_get_cache_path (hash)) == NULL)
+            return NULL;
+        if (!g_file_test (path, G_FILE_TEST_EXISTS))
+            break;
+
+        if (g_stat (compose_file, &original_buf))
+            break;
+        if (g_stat (path, &cache_buf))
+            break;
+        if (original_buf.st_mtime > cache_buf.st_mtime)
+            break;
+        if (!g_file_get_contents (path, &contents, &length, &error)) {
+            g_warning ("Failed to get cache content %s: %s",
+                       path, error->message);
+            g_error_free (error);
+            break;
+        }
+
+        retval = ibus_compose_table_deserialize (contents, length);
+        if (retval == NULL)
+            g_warning ("Failed to load the cache file: %s", path);
+        else
+            retval->id = hash;
+    } while (0);
+
+    g_free (contents);
+    g_free (path);
+    return retval;
+}
+
+static void
+ibus_compose_table_save_cache (IBusComposeTable *compose_table)
+{
+    gchar *path = NULL;
+    GVariant *variant_table = NULL;
+    const gchar *contents = NULL;
+    GError *error = NULL;
+    gsize length = 0;
+
+    if ((path = ibus_compose_hash_get_cache_path (compose_table->id)) == NULL)
+      return;
+
+    variant_table = ibus_compose_table_serialize (compose_table);
+    if (variant_table == NULL) {
+        g_warning ("Failed to serialize compose table %s", path);
+        goto out_save_cache;
+    }
+    contents = g_variant_get_data (variant_table);
+    length = g_variant_get_size (variant_table);
+    if (!g_file_set_contents (path, contents, length, &error)) {
+        g_warning ("Failed to save compose table %s: %s", path, error->message);
+        g_error_free (error);
+        goto out_save_cache;
+    }
+
+out_save_cache:
+    g_variant_unref (variant_table);
+    g_free (path);
+}
+
+static IBusComposeTable *
+ibus_compose_table_new_with_list (GList   *compose_list,
+                                  int      max_compose_len,
+                                  int      n_index_stride,
+                                  guint32  hash)
 {
     guint length;
     guint n = 0;
-    int i;
-    static guint16 *ibus_compose_seqs = NULL;
+    int i, j;
+    guint16 *ibus_compose_seqs = NULL;
     GList *list;
+    IBusComposeData *compose_data;
     IBusComposeTable *retval = NULL;
 
     g_return_val_if_fail (compose_list != NULL, NULL);
@@ -751,18 +761,24 @@ ibus_compose_table_new_with_list (GList *compose_list,
     ibus_compose_seqs = g_new0 (guint16, length * n_index_stride);
 
     for (list = compose_list; list != NULL; list = list->next) {
-        GArray *array = (GArray *) list->data;
-        const gchar *data;
-        for (i = 0; i < n_index_stride; i++) {
-            data = g_array_index (array, const gchar *, i);
-            ibus_compose_seqs[n++] = (guint16) get_codepoint (data);
+        compose_data = list->data;
+        for (i = 0; i < max_compose_len; i++) {
+            if (compose_data->sequence[i] == 0) {
+                for (j = i; j < max_compose_len; j++)
+                    ibus_compose_seqs[n++] = 0;
+                break;
+            }
+            ibus_compose_seqs[n++] = (guint16) compose_data->sequence[i];
         }
+        ibus_compose_seqs[n++] = (guint16) compose_data->value[0];
+        ibus_compose_seqs[n++] = (guint16) compose_data->value[1];
     }
 
     retval = g_new0 (IBusComposeTable, 1);
     retval->data = ibus_compose_seqs;
     retval->max_seq_len = max_compose_len;
     retval->n_seqs = length;
+    retval->id = hash;
 
     return retval;
 }
@@ -772,35 +788,116 @@ ibus_compose_table_new_with_file (const gchar *compose_file)
 {
     GList *compose_list = NULL;
     IBusComposeTable *compose_table;
+    int max_compose_len = 0;
+    int n_index_stride = 0;
 
     g_assert (compose_file != NULL);
 
-    MAX_COMPOSE_LEN = 0;
-    N_INDEX_STRIDE = 0;
+    compose_list = ibus_compose_list_parse_file (compose_file);
+    if (compose_list == NULL)
+        return NULL;
+    compose_list = ibus_compose_list_check_duplicated (compose_list);
+    compose_list = ibus_compose_list_check_uint16 (compose_list);
+    compose_list = ibus_compose_list_format_for_gtk (compose_list,
+                                                     &max_compose_len,
+                                                     &n_index_stride);
+    compose_list = g_list_sort_with_data (
+            compose_list,
+            (GCompareDataFunc) ibus_compose_data_compare,
+            GINT_TO_POINTER (max_compose_len));
 
-    compose_list = parse_compose_file (compose_file);
     if (compose_list == NULL) {
-        g_list_free_full (compose_list, (GDestroyNotify) g_array_unref);
+        g_warning ("compose file %s does not include any keys besides keys "
+                   "in en-us compose file", compose_file);
         return NULL;
     }
-    compose_list = check_duplicated_compose (compose_list);
-    compose_list = check_uint16 (compose_list);
-    compose_list = format_for_gtk (compose_list);
-    compose_list = g_list_sort (compose_list,
-                                 (GCompareFunc) compare_array);
-    if (compose_list == NULL) {
-        g_list_free_full (compose_list, (GDestroyNotify) g_array_unref);
-        return NULL;
+
+    if (g_getenv ("IBUS_COMPOSE_TABLE_PRINT") != NULL) {
+        ibus_compose_list_print (compose_list, max_compose_len, n_index_stride);
     }
 
-    if (g_getenv ("IBUS_PRINT_COMPOSE_TABLE") != NULL) {
-        print_compose_list (compose_list);
-    }
+    compose_table = ibus_compose_table_new_with_list (
+            compose_list,
+            max_compose_len,
+            n_index_stride,
+            g_str_hash (compose_file));
 
-    compose_table = ibus_compose_table_new_with_list (compose_list,
-                                                      MAX_COMPOSE_LEN,
-                                                      N_INDEX_STRIDE);
-    g_list_free_full (compose_list, (GDestroyNotify) g_array_unref);
+    g_list_free_full (compose_list,
+                      (GDestroyNotify) ibus_compose_list_element_free);
 
     return compose_table;
+}
+
+/* if ibus_compose_seqs[N - 1] is an outputed compose character,
+ * ibus_compose_seqs[N * 2 - 1] is also an outputed compose character.
+ * and ibus_compose_seqs[0] to ibus_compose_seqs[0 + N - 3] are the
+ * sequences and call ibus_engine_simple_add_table:
+ * ibus_engine_simple_add_table(engine, ibus_compose_seqs,
+ *                              N - 2, G_N_ELEMENTS(ibus_compose_seqs) / N)
+ * The compose sequences are allowed within G_MAXUINT16
+ */
+GSList *
+ibus_compose_table_list_add_array (GSList        *compose_tables,
+                                   const guint16 *data,
+                                   gint           max_seq_len,
+                                   gint           n_seqs)
+{
+    guint32 hash;
+    IBusComposeTable *compose_table;
+    int n_index_stride = max_seq_len + 2;
+    int length = n_index_stride * n_seqs;
+    int i;
+    guint16 *ibus_compose_seqs = NULL;
+
+    g_return_val_if_fail (data != NULL, compose_tables);
+    g_return_val_if_fail (max_seq_len <= IBUS_MAX_COMPOSE_LEN, compose_tables);
+
+    hash = ibus_compose_table_data_hash (data, length);
+
+    if (g_slist_find_custom (compose_tables,
+                             GINT_TO_POINTER (hash),
+                             ibus_compose_table_find) != NULL) {
+        return compose_tables;
+    }
+
+    ibus_compose_seqs = g_new0 (guint16, length);
+    for (i = 0; i < length; i++)
+        ibus_compose_seqs[i] = data[i];
+
+    compose_table = g_new (IBusComposeTable, 1);
+    compose_table->data = ibus_compose_seqs;
+    compose_table->max_seq_len = max_seq_len;
+    compose_table->n_seqs = n_seqs;
+    compose_table->id = hash;
+
+    return g_slist_prepend (compose_tables, compose_table);
+}
+
+GSList *
+ibus_compose_table_list_add_file (GSList      *compose_tables,
+                                  const gchar *compose_file)
+{
+    guint32 hash;
+    IBusComposeTable *compose_table;
+
+    g_return_val_if_fail (compose_file != NULL, compose_tables);
+
+    hash = g_str_hash (compose_file);
+    if (g_slist_find_custom (compose_tables,
+                             GINT_TO_POINTER (hash),
+                             ibus_compose_table_find) != NULL) {
+        return compose_tables;
+    }
+
+    compose_table = ibus_compose_table_load_cache (compose_file);
+    if (compose_table != NULL)
+        return g_slist_prepend (compose_tables, compose_table);
+
+   if ((compose_table = ibus_compose_table_new_with_file (compose_file))
+           == NULL) {
+       return compose_tables;
+   }
+
+    ibus_compose_table_save_cache (compose_table);
+    return g_slist_prepend (compose_tables, compose_table);
 }

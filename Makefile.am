@@ -2,8 +2,9 @@
 #
 # ibus - The Input Bus
 #
-# Copyright (c) 2007-2010 Peng Huang <shawn.p.huang@gmail.com>
-# Copyright (c) 2007-2010 Red Hat, Inc.
+# Copyright (c) 2007-2016 Peng Huang <shawn.p.huang@gmail.com>
+# Copyright (c) 2015-2017 Takao Fujiwara <takao.fujiwara1@gmail.com>
+# Copyright (c) 2007-2017 Red Hat, Inc.
 #
 # This library is free software; you can redistribute it and/or
 # modify it under the terms of the GNU Lesser General Public
@@ -50,13 +51,14 @@ SUBDIRS = \
 	util \
 	conf \
 	client \
-	tools \
+	portal \
 	data \
 	m4 \
 	po \
 	docs \
 	$(ENGINE_DIR) \
 	$(UI_DIR) \
+	tools \
 	$(DAEMON_DIR) \
 	$(PYTHON_LIB_DIRS) \
 	$(SETUP_DIR) \
@@ -69,6 +71,7 @@ pkgconfig_DATA = ibus-@IBUS_API_VERSION@.pc
 
 ibus_pc_in = ibus-@IBUS_API_VERSION@.pc.in
 EXTRA_DIST = \
+	COPYING.unicode \
 	autogen.sh \
 	$(ibus_pc_in) \
 	ibus.spec.in \
@@ -89,17 +92,24 @@ install-data-hook:
 DISTCHECK_CONFIGURE_FLAGS = \
 	--enable-gtk-doc \
 	--disable-schemas-install \
-	--disable-introspection \
 	$(NULL)
 
 dist-hook:
 	if test -d .git ; then \
 		git log --name-status --date=iso > $(distdir)/ChangeLog ; \
+		IBUS_PREV_MICRO_VERSION=`expr $(IBUS_MICRO_VERSION) - 1`; \
+		IBUS_PREV_VERSION=\
+"$(IBUS_MAJOR_VERSION).$(IBUS_MINOR_VERSION).$$IBUS_PREV_MICRO_VERSION"; \
+		echo "Changes in IBus $(IBUS_VERSION)" > $(distdir)/NEWS; \
+		echo "" >> $(distdir)/NEWS; \
+		git log $$IBUS_PREV_VERSION...$(IBUS_VERSION) --reverse \
+		        --pretty=format:'%s (%an) %h' >> $(distdir)/NEWS; \
 	fi
 
 distclean-local:
 	if test "x$(srcdir)" = "x."; then :; else \
 		rm -f ChangeLog; \
+		rm -f NEWS; \
 	fi
 
 MAINTAINERCLEANFILES = \
@@ -123,48 +133,6 @@ srpm: dist @PACKAGE_NAME@.spec
 			--define "_rpmdir `pwd`/rpm" \
 			--define "_specdir `pwd`/rpm" \
 			@PACKAGE_NAME@.spec
-
-.PHONY: debian/changelog
-debian/changelog:
-	$(AM_V_GEN) \
-	( \
-		. /etc/lsb-release; \
-		date=`date -R`; \
-		version=@VERSION@; \
-		serie=$(serie); \
-		if test -z "$$serie"; then \
-		  serie=$$DISTRIB_CODENAME; \
-		fi; \
-		if test -z "$$release"; then \
-		  release=1; \
-		fi; \
-		s=`cat debian/changelog.in`; \
-		eval "echo \"$${s}\""; \
-	) > $@
-
-ppa: dist debian/changelog
-	$(AM_V_GEN) \
-	( \
-		mkdir ppa; \
-		cd ppa; \
-		tar zxvf ../$(distdir).tar.gz ; \
-		cd $(distdir); \
-		cp -a ../../debian . ; \
-		cd debian; \
-		debuild -S -sa ; \
-	)
-
-dpkg: dist debian/changelog
-	$(AM_V_GEN) \
-	( \
-		mkdir ppa; \
-		cd ppa; \
-		tar zxvf ../$(distdir).tar.gz ; \
-		cd $(distdir); \
-		cp -a ../../debian . ; \
-		cd debian; \
-		debuild -b -us -uc; \
-	)
 
 clean-rpm:
 	$(RM) -r "`uname -i`"

@@ -3,7 +3,7 @@
  * ibus - The Input Bus
  *
  * Copyright(c) 2011-2015 Peng Huang <shawn.p.huang@gmail.com>
- * Copyright(c) 2015 Takao Fujiwara <takao.fujiwara1@gmail.com>
+ * Copyright(c) 2015-2017 Takao Fujiwara <takao.fujiwara1@gmail.com>
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -37,6 +37,7 @@ class CandidateArea : Gtk.Box {
     private IBus.Text[] m_ibus_candidates;
     private uint m_focus_candidate;
     private bool m_show_cursor;
+    private ThemedRGBA m_rgba;
 
     private const string LABELS[] = {
         "1.", "2.", "3.", "4.", "5.", "6.", "7.", "8.",
@@ -62,6 +63,19 @@ class CandidateArea : Gtk.Box {
     public CandidateArea(bool vertical) {
         GLib.Object();
         set_vertical(vertical, true);
+        m_rgba = new ThemedRGBA(this);
+    }
+
+    public bool candidate_scrolled(Gdk.EventScroll event) {
+        switch (event.direction) {
+        case Gdk.ScrollDirection.UP:
+            cursor_up();
+            break;
+        case Gdk.ScrollDirection.DOWN:
+            cursor_down();
+            break;
+        }
+        return true;
     }
 
     public bool get_vertical() {
@@ -165,21 +179,18 @@ class CandidateArea : Gtk.Box {
             if (i < candidates.length) {
                 Pango.AttrList attrs = get_pango_attr_list_from_ibus_text(candidates[i]);
                 if (i == focus_candidate && show_cursor) {
-                    Gtk.StyleContext context = m_candidates[i].get_style_context();
-                    Gdk.RGBA color = context.get_color(Gtk.StateFlags.SELECTED);
                     Pango.Attribute pango_attr = Pango.attr_foreground_new(
-                            (uint16)(color.red * uint16.MAX),
-                            (uint16)(color.green * uint16.MAX),
-                            (uint16)(color.blue * uint16.MAX));
+                            (uint16)(m_rgba.selected_fg.red * uint16.MAX),
+                            (uint16)(m_rgba.selected_fg.green * uint16.MAX),
+                            (uint16)(m_rgba.selected_fg.blue * uint16.MAX));
                     pango_attr.start_index = 0;
                     pango_attr.end_index = candidates[i].get_text().length;
                     attrs.insert((owned)pango_attr);
 
-                    color = context.get_background_color(Gtk.StateFlags.SELECTED);
                     pango_attr = Pango.attr_background_new(
-                            (uint16)(color.red * uint16.MAX),
-                            (uint16)(color.green * uint16.MAX),
-                            (uint16)(color.blue * uint16.MAX));
+                           (uint16)(m_rgba.selected_bg.red * uint16.MAX),
+                           (uint16)(m_rgba.selected_bg.green * uint16.MAX),
+                           (uint16)(m_rgba.selected_bg.blue * uint16.MAX));
                     pango_attr.start_index = 0;
                     pango_attr.end_index = candidates[i].get_text().length;
                     attrs.insert((owned)pango_attr);
@@ -220,9 +231,17 @@ class CandidateArea : Gtk.Box {
         next_button.set_relief(Gtk.ReliefStyle.NONE);
 
         if (m_vertical) {
+            Gtk.EventBox container_ebox = new Gtk.EventBox();
+            container_ebox.add_events(Gdk.EventMask.SCROLL_MASK);
+            container_ebox.scroll_event.connect(candidate_scrolled);
+            add(container_ebox);
+
+            Gtk.Box vbox = new Gtk.Box(Gtk.Orientation.VERTICAL, 0);
+            container_ebox.add(vbox);
+
             // Add Candidates
             Gtk.Box candidates_hbox = new Gtk.Box(Gtk.Orientation.HORIZONTAL, 0);
-            pack_start(candidates_hbox, false, false, 0);
+            vbox.pack_start(candidates_hbox, false, false, 0);
             Gtk.Box labels_vbox = new Gtk.Box(Gtk.Orientation.VERTICAL, 0);
             labels_vbox.set_homogeneous(true);
             Gtk.Box candidates_vbox = new Gtk.Box(Gtk.Orientation.VERTICAL, 0);
@@ -232,7 +251,7 @@ class CandidateArea : Gtk.Box {
             candidates_hbox.pack_start(candidates_vbox, true, true, 4);
 
             // Add HSeparator
-            pack_start(new HSeparator(), false, false, 0);
+            vbox.pack_start(new HSeparator(), false, false, 0);
 
             // Add buttons
             Gtk.Box buttons_hbox = new Gtk.Box(Gtk.Orientation.HORIZONTAL, 0);
@@ -241,7 +260,7 @@ class CandidateArea : Gtk.Box {
             buttons_hbox.pack_start(state_label, true, true, 0);
             buttons_hbox.pack_start(prev_button, false, false, 0);
             buttons_hbox.pack_start(next_button, false, false, 0);
-            pack_start(buttons_hbox, false, false, 0);
+            vbox.pack_start(buttons_hbox, false, false, 0);
 
             m_labels = {};
             m_candidates = {};
@@ -287,8 +306,13 @@ class CandidateArea : Gtk.Box {
                 m_widgets += candidate_ebox;
             }
         } else {
+            Gtk.EventBox container_ebox = new Gtk.EventBox();
+            container_ebox.add_events(Gdk.EventMask.SCROLL_MASK);
+            container_ebox.scroll_event.connect(candidate_scrolled);
+            add(container_ebox);
+
             Gtk.Box hbox = new Gtk.Box(Gtk.Orientation.HORIZONTAL, 0);
-            add(hbox);
+            container_ebox.add(hbox);
 
             m_labels = {};
             m_candidates = {};

@@ -93,9 +93,50 @@ bus_new_connection_cb (GDBusServer     *server,
     return TRUE;
 }
 
+static void
+_server_connect_start_portal_cb (GObject      *source_object,
+                                 GAsyncResult *res,
+                                 gpointer      user_data)
+{
+    GVariant *result;
+    GError *error = NULL;
+
+    result = g_dbus_connection_call_finish (G_DBUS_CONNECTION (source_object),
+                                            res,
+                                            &error);
+    if (result != NULL) {
+        g_variant_unref (result);
+    } else {
+        g_print ("portal is not running: %s\n", error->message);
+        g_error_free (error);
+    }
+}
+
+static void
+bus_acquired_handler (GDBusConnection *connection,
+                      const gchar     *name,
+                      gpointer         user_data)
+{
+    g_dbus_connection_call (connection,
+                            IBUS_SERVICE_PORTAL,
+                            IBUS_PATH_IBUS,
+                            "org.freedesktop.DBus.Peer",
+                            "Ping",
+                            g_variant_new ("()"),
+                            G_VARIANT_TYPE ("()"),
+                            G_DBUS_CALL_FLAGS_NONE,
+                            -1,
+                            NULL /* cancellable */,
+                            (GAsyncReadyCallback)
+                                    _server_connect_start_portal_cb,
+                            NULL);
+}
+
 void
 bus_server_init (void)
 {
+    GError *error = NULL;
+
     dbus = bus_dbus_impl_get_default ();
     ibus = bus_ibus_impl_get_default ();
     bus_dbus_impl_register_object (dbus, (IBusService *)ibus);
@@ -103,12 +144,21 @@ bus_server_init (void)
     /* init server */
     GDBusServerFlags flags = G_DBUS_SERVER_FLAGS_AUTHENTICATION_ALLOW_ANONYMOUS;
     gchar *guid = g_dbus_generate_guid ();
+    if (!g_str_has_prefix (g_address, "unix:tmpdir=")) {
+        g_error ("Your socket address does not have the format unix:tmpdir=$DIR; %s",
+                 g_address);
+    }
     server =  g_dbus_server_new_sync (
                     g_address, /* the place where the socket file lives, e.g. /tmp, abstract namespace, etc. */
                     flags, guid,
                     NULL /* observer */,
                     NULL /* cancellable */,
-                    NULL /* error */);
+                    &error);
+    if (server == NULL) {
+        g_error ("g_dbus_server_new_sync() is failed with address %s "
+                 "and guid %s: %s",
+                 g_address, guid, error->message);
+    }
     g_free (guid);
 
     g_signal_connect (server, "new-connection", G_CALLBACK (bus_new_connection_cb), NULL);
@@ -123,8 +173,10 @@ bus_server_init (void)
     ibus_write_address (address);
 
     /* own a session bus name so that third parties can easily track our life-cycle */
-    g_bus_own_name (G_BUS_TYPE_SESSION, IBUS_SERVICE_IBUS, G_BUS_NAME_OWNER_FLAGS_NONE,
-                    NULL, NULL, NULL, NULL, NULL);
+    g_bus_own_name (G_BUS_TYPE_SESSION, IBUS_SERVICE_IBUS,
+                    G_BUS_NAME_OWNER_FLAGS_NONE,
+                    bus_acquired_handler,
+                    NULL, NULL, NULL, NULL);
 }
 
 const gchar *

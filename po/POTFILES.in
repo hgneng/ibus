@@ -31,6 +31,7 @@ ibus/object.py
 ibus/panel.py
 ibus/property.py
 ibus/utility.py
+setup/emojilang.py
 setup/engineabout.py
 setup/enginecombobox.py
 setup/enginedialog.py
@@ -40,6 +41,7 @@ setup/keyboardshortcut.py
 setup/main.py
 src/ibusbus.c
 src/ibusconfig.c
+src/ibusemojigen.h
 src/ibusengine.c
 src/ibusfactory.c
 src/ibushotkey.c
@@ -49,12 +51,15 @@ src/ibuspanelservice.c
 src/ibusproxy.c
 src/ibusregistry.c
 src/ibusservice.c
+src/ibusunicodegen.h
 src/ibusutil.c
 src/keyname-table.h
 tools/main.vala
 ui/gtk3/application.vala
 ui/gtk3/candidatearea.vala
 ui/gtk3/candidatepanel.vala
+ui/gtk3/emojier.vala
+ui/gtk3/emojierapp.vala
 ui/gtk3/handle.vala
 ui/gtk3/iconwidget.vala
 ui/gtk3/keybindingmanager.vala

@@ -3,7 +3,8 @@
 # ibus - The Input Bus
 #
 # Copyright (c) 2007-2013 Peng Huang <shawn.p.huang@gmail.com>
-# Copyright (c) 2007-2013 Red Hat, Inc.
+# Copyright (c) 2013-2018 Takao Fujiwara <takao.fujiwara1@gmail.com>
+# Copyright (c) 2007-2018 Red Hat, Inc.
 #
 # This library is free software; you can redistribute it and/or
 # modify it under the terms of the GNU Lesser General Public
@@ -105,6 +106,10 @@ marshalers.c: marshalers.h marshalers.list
 	$(GLIB_GENMARSHAL) --prefix=bus_marshal $(srcdir)/marshalers.list --body --internal) > $@.tmp && \
 	mv $@.tmp $@
 
+if ENABLE_EMOJI_DICT
+AM_CFLAGS += -DEMOJI_DICT
+endif
+
 
 if ENABLE_TESTS
 TESTS = \
@@ -112,6 +117,14 @@ TESTS = \
 	test-stress	\
 	$(NULL)
 endif
+
+TESTS_ENVIRONMENT = \
+    top_builddir=$(top_builddir) \
+    top_srcdir=$(top_srcdir) \
+    builddir=$(builddir) \
+    $(NULL)
+
+LOG_COMPILER = $(top_srcdir)/src/tests/runtest
 
 noinst_PROGRAMS = $(TESTS)
 
@@ -173,5 +186,16 @@ man_onedir = $(mandir)/man1
 		mv $@.tmp $@
 %.1.gz: %.1
 	$(AM_V_GEN) gzip -c $< > $@.tmp && mv $@.tmp $@
+
+
+dbusservice_in_files = org.freedesktop.IBus.service.in
+dbusservice_DATA = $(dbusservice_in_files:.service.in=.service)
+dbusservicedir=${datadir}/dbus-1/services
+
+org.freedesktop.IBus.service: org.freedesktop.IBus.service.in
+	$(AM_V_GEN) sed -e "s|\@bindir\@|$(bindir)|" -e "s|\@xim_cli_arg\@|$(XIM_CLI_ARG)|" $< > $@.tmp && mv $@.tmp $@
+
+EXTRA_DIST += $(dbusservice_in_files)
+CLEANFILES += $(dbusservice_DATA)
 
 -include $(top_srcdir)/git.mk

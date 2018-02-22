@@ -2,7 +2,8 @@
 /* vim:set et sts=4: */
 /* ibus - The Input Bus
  * Copyright (C) 2008-2015 Peng Huang <shawn.p.huang@gmail.com>
- * Copyright (C) 2008-2015 Red Hat, Inc.
+ * Copyright (C) 2015-2016 Takao Fujiwara <takao.fujiwara1@gmail.com>
+ * Copyright (C) 2008-2016 Red Hat, Inc.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -47,12 +48,14 @@ enum {
 enum {
     PROP_0 = 0,
     PROP_CONNECT_ASYNC,
+    PROP_CLIENT_ONLY,
 };
 
 /* IBusBusPriv */
 struct _IBusBusPrivate {
     GFileMonitor *monitor;
     GDBusConnection *connection;
+    gboolean connected;
     gboolean watch_dbus_signal;
     guint watch_dbus_signal_id;
     gboolean watch_ibus_signal;
@@ -61,7 +64,10 @@ struct _IBusBusPrivate {
     gchar *unique_name;
     gboolean connect_async;
     gchar *bus_address;
+    gboolean use_portal;
+    gboolean client_only;
     GCancellable *cancellable;
+    guint portal_name_watch_id;
 };
 
 static guint    bus_signals[LAST_SIGNAL] = { 0 };
@@ -73,6 +79,7 @@ static GObject  *ibus_bus_constructor           (GType                   type,
                                                  guint                   n_params,
                                                  GObjectConstructParam  *params);
 static void      ibus_bus_destroy               (IBusObject             *object);
+static void      ibus_bus_connect_async         (IBusBus                *bus);
 static void      ibus_bus_watch_dbus_signal     (IBusBus                *bus);
 static void      ibus_bus_unwatch_dbus_signal   (IBusBus                *bus);
 static void      ibus_bus_watch_ibus_signal     (IBusBus                *bus);
@@ -116,8 +123,10 @@ ibus_bus_class_init (IBusBusClass *class)
     IBusObjectClass *ibus_object_class = IBUS_OBJECT_CLASS (class);
 
     gobject_class->constructor = ibus_bus_constructor;
-    gobject_class->set_property = (GObjectSetPropertyFunc) ibus_bus_set_property;
-    gobject_class->get_property = (GObjectGetPropertyFunc) ibus_bus_get_property;
+    gobject_class->set_property =
+            (GObjectSetPropertyFunc) ibus_bus_set_property;
+    gobject_class->get_property =
+            (GObjectGetPropertyFunc) ibus_bus_get_property;
     ibus_object_class->destroy = ibus_bus_destroy;
 
     /* install properties */
@@ -127,13 +136,28 @@ ibus_bus_class_init (IBusBusClass *class)
      * Whether the #IBusBus object should connect asynchronously to the bus.
      *
      */
-    g_object_class_install_property (gobject_class,
-                                     PROP_CONNECT_ASYNC,
-                                     g_param_spec_boolean ("connect-async",
-                                                           "Connect Async",
-                                                           "Connect asynchronously to the bus",
-                                                           FALSE,
-                                                           G_PARAM_READWRITE | G_PARAM_CONSTRUCT_ONLY));
+    g_object_class_install_property (
+            gobject_class,
+            PROP_CONNECT_ASYNC,
+            g_param_spec_boolean ("connect-async",
+                                  "Connect Async",
+                                  "Connect asynchronously to the bus",
+                                  FALSE,
+                                  G_PARAM_READWRITE | G_PARAM_CONSTRUCT_ONLY));
+    /**
+     * IBusBus:client-only:
+     *
+     * Whether the #IBusBus object is for client use only.
+     *
+     */
+    g_object_class_install_property (
+            gobject_class,
+            PROP_CLIENT_ONLY,
+            g_param_spec_boolean ("client-only",
+                                  "ClientOnly",
+                                  "Client use only",
+                                  FALSE,
+                                  G_PARAM_READWRITE | G_PARAM_CONSTRUCT_ONLY));
 
     /* install signals */
     /**
@@ -293,6 +317,8 @@ ibus_bus_close_connection (IBusBus *bus)
     g_cancellable_cancel (bus->priv->cancellable);
     g_cancellable_reset (bus->priv->cancellable);
 
+    bus->priv->connected = FALSE;
+
     /* unref the old connection at first */
     if (bus->priv->connection != NULL) {
         g_signal_handlers_disconnect_by_func (bus->priv->connection,
@@ -310,6 +336,8 @@ static void
 ibus_bus_connect_completed (IBusBus *bus)
 {
     g_assert (bus->priv->connection);
+
+    bus->priv->connected = TRUE;
     /* FIXME */
     ibus_bus_hello (bus);
 
@@ -328,9 +356,38 @@ ibus_bus_connect_completed (IBusBus *bus)
 }
 
 static void
+_bus_connect_start_portal_cb (GObject      *source_object,
+                              GAsyncResult *res,
+                              gpointer      user_data)
+{
+    IBusBus *bus = IBUS_BUS (user_data);
+    GVariant *result;
+    GError *error = NULL;
+
+    result = g_dbus_connection_call_finish (G_DBUS_CONNECTION (source_object),
+                                            res,
+                                            &error);
+    if (result != NULL) {
+        ibus_bus_connect_completed (bus);
+        g_variant_unref (result);
+    } else {
+        g_error_free (error);
+
+        g_dbus_connection_close (bus->priv->connection, NULL, NULL, NULL);
+        g_object_unref (bus->priv->connection);
+        bus->priv->connection = NULL;
+
+        g_free (bus->priv->bus_address);
+        bus->priv->bus_address = NULL;
+    }
+
+    g_object_unref (bus);
+}
+
+static void
 _bus_connect_async_cb (GObject      *source_object,
-                        GAsyncResult *res,
-                        gpointer      user_data)
+                       GAsyncResult *res,
+                       gpointer      user_data)
 {
     g_return_if_fail (user_data != NULL);
     g_return_if_fail (IBUS_IS_BUS (user_data));
@@ -348,7 +405,26 @@ _bus_connect_async_cb (GObject      *source_object,
     }
 
     if (bus->priv->connection != NULL) {
-        ibus_bus_connect_completed (bus);
+        if (bus->priv->use_portal) {
+            g_object_set_data (G_OBJECT (bus->priv->connection),
+                               "ibus-portal-connection",
+                               GINT_TO_POINTER (TRUE));
+            g_dbus_connection_call (
+                    bus->priv->connection,
+                    IBUS_SERVICE_PORTAL,
+                    IBUS_PATH_IBUS,
+                    "org.freedesktop.DBus.Peer",
+                    "Ping",
+                    g_variant_new ("()"),
+                    G_VARIANT_TYPE ("()"),
+                    G_DBUS_CALL_FLAGS_NONE,
+                    -1,
+                    bus->priv->cancellable,
+                    (GAsyncReadyCallback) _bus_connect_start_portal_cb,
+                    g_object_ref (bus));
+        } else {
+            ibus_bus_connect_completed (bus);
+        }
     }
     else {
         g_free (bus->priv->bus_address);
@@ -359,21 +435,32 @@ _bus_connect_async_cb (GObject      *source_object,
     g_object_unref (bus);
 }
 
+static gchar *
+ibus_bus_get_bus_address (IBusBus *bus)
+{
+    if (_bus->priv->use_portal)
+        return g_dbus_address_get_for_bus_sync (G_BUS_TYPE_SESSION, NULL, NULL);
+    else
+        return g_strdup (ibus_get_address ());
+}
+
 static void
 ibus_bus_connect_async (IBusBus *bus)
 {
-    const gchar *bus_address = ibus_get_address ();
+    gchar *bus_address = ibus_bus_get_bus_address (bus);
 
     if (bus_address == NULL)
         return;
 
-    if (g_strcmp0 (bus->priv->bus_address, bus_address) == 0)
+    if (g_strcmp0 (bus->priv->bus_address, bus_address) == 0) {
+        g_free (bus_address);
         return;
+    }
 
     /* Close current connection and cancel ongoing connect request. */
     ibus_bus_close_connection (bus);
 
-    bus->priv->bus_address = g_strdup (bus_address);
+    bus->priv->bus_address = bus_address;
     g_object_ref (bus);
     g_dbus_connection_new_for_address (
             bus_address,
@@ -382,6 +469,28 @@ ibus_bus_connect_async (IBusBus *bus)
             NULL,
             bus->priv->cancellable,
             _bus_connect_async_cb, bus);
+}
+
+static gboolean
+is_in_flatpak (void)
+{
+    static gboolean flatpak_info_read;
+    static gboolean in_flatpak;
+
+    if (flatpak_info_read)
+        return in_flatpak;
+
+    flatpak_info_read = TRUE;
+    if (g_file_test ("/.flatpak-info", G_FILE_TEST_EXISTS))
+        in_flatpak = TRUE;
+    return in_flatpak;
+}
+
+static gboolean
+ibus_bus_should_connect_portal (IBusBus *bus)
+{
+    return bus->priv->client_only &&
+        (is_in_flatpak () || g_getenv ("IBUS_USE_PORTAL") != NULL);
 }
 
 static void
@@ -430,7 +539,6 @@ ibus_bus_init (IBusBus *bus)
 {
     struct stat buf;
     gchar *path;
-    GFile *file;
 
     bus->priv = IBUS_BUS_GET_PRIVATE (bus);
 
@@ -442,6 +550,7 @@ ibus_bus_init (IBusBus *bus)
     bus->priv->watch_ibus_signal_id = 0;
     bus->priv->unique_name = NULL;
     bus->priv->connect_async = FALSE;
+    bus->priv->client_only = FALSE;
     bus->priv->bus_address = NULL;
     bus->priv->cancellable = g_cancellable_new ();
 
@@ -452,17 +561,12 @@ ibus_bus_init (IBusBus *bus)
 
     if (stat (path, &buf) == 0) {
         if (buf.st_uid != getuid ()) {
-            g_warning ("The owner of %s is not %s!", path, ibus_get_user_name ());
+            g_warning ("The owner of %s is not %s!",
+                       path, ibus_get_user_name ());
             return;
         }
     }
 
-    file = g_file_new_for_path (ibus_get_socket_path ());
-    bus->priv->monitor = g_file_monitor_file (file, 0, NULL, NULL);
-
-    g_signal_connect (bus->priv->monitor, "changed", (GCallback) _changed_cb, bus);
-
-    g_object_unref (file);
     g_free (path);
 }
 
@@ -475,6 +579,9 @@ ibus_bus_set_property (IBusBus      *bus,
     switch (prop_id) {
     case PROP_CONNECT_ASYNC:
         bus->priv->connect_async = g_value_get_boolean (value);
+        break;
+    case PROP_CLIENT_ONLY:
+        bus->priv->client_only = g_value_get_boolean (value);
         break;
     default:
         G_OBJECT_WARN_INVALID_PROPERTY_ID (bus, prop_id, pspec);
@@ -491,10 +598,37 @@ ibus_bus_get_property (IBusBus    *bus,
     case PROP_CONNECT_ASYNC:
         g_value_set_boolean (value, bus->priv->connect_async);
         break;
+    case PROP_CLIENT_ONLY:
+        g_value_set_boolean (value, bus->priv->client_only);
+        break;
     default:
         G_OBJECT_WARN_INVALID_PROPERTY_ID (bus, prop_id, pspec);
     }
 }
+
+static void
+portal_name_appeared (GDBusConnection *connection,
+                      const gchar     *name,
+                      const gchar     *owner,
+                      gpointer         user_data)
+{
+    IBusBus *bus = IBUS_BUS (user_data);
+
+    if (bus->priv->connection == NULL)
+        ibus_bus_connect_async (bus);
+}
+
+static void
+portal_name_vanished (GDBusConnection *connection,
+                      const gchar     *name,
+                      gpointer         user_data)
+{
+    IBusBus *bus = IBUS_BUS (user_data);
+
+    if (bus->priv->connection)
+        g_dbus_connection_close (bus->priv->connection, NULL, NULL, NULL);
+}
+
 
 static GObject*
 ibus_bus_constructor (GType                  type,
@@ -502,13 +636,34 @@ ibus_bus_constructor (GType                  type,
                       GObjectConstructParam *params)
 {
     GObject *object;
+    GFile *file;
 
     /* share one IBusBus instance in whole application */
     if (_bus == NULL) {
-        object = G_OBJECT_CLASS (ibus_bus_parent_class)->constructor (type, n_params, params);
+        object = G_OBJECT_CLASS (ibus_bus_parent_class)->constructor (
+                type, n_params, params);
         /* make bus object sink */
         g_object_ref_sink (object);
         _bus = IBUS_BUS (object);
+
+        _bus->priv->use_portal = ibus_bus_should_connect_portal (_bus);
+
+        if (!_bus->priv->use_portal) {
+            file = g_file_new_for_path (ibus_get_socket_path ());
+            _bus->priv->monitor = g_file_monitor_file (file, 0, NULL, NULL);
+            g_signal_connect (_bus->priv->monitor, "changed",
+                              (GCallback) _changed_cb, _bus);
+            g_object_unref (file);
+        } else {
+            _bus->priv->portal_name_watch_id =
+                g_bus_watch_name (G_BUS_TYPE_SESSION,
+                                  IBUS_SERVICE_PORTAL,
+                                  G_BUS_NAME_WATCHER_FLAGS_NONE,
+                                  portal_name_appeared,
+                                  portal_name_vanished,
+                                  _bus, NULL);
+        }
+
 
         if (_bus->priv->connect_async)
             ibus_bus_connect_async (_bus);
@@ -560,77 +715,102 @@ ibus_bus_destroy (IBusObject *object)
     g_object_unref (bus->priv->cancellable);
     bus->priv->cancellable = NULL;
 
+    if (bus->priv->portal_name_watch_id) {
+        g_bus_unwatch_name (bus->priv->portal_name_watch_id);
+        bus->priv->portal_name_watch_id = 0;
+    }
+
     IBUS_OBJECT_CLASS (ibus_bus_parent_class)->destroy (object);
 }
 
 static gboolean
-_async_finish_void (GAsyncResult *res,
-                    GError      **error)
+_async_finish_void (GTask   *task,
+                    GError **error)
 {
-    GSimpleAsyncResult *simple = (GSimpleAsyncResult *) res;
-    if (g_simple_async_result_propagate_error (simple, error))
+    /* g_task_propagate_error() is not a public API and 
+     * g_task_had_error() needs to be called before
+     * g_task_propagate_pointer() clears task->error.
+     */
+    gboolean had_error = g_task_had_error (task);
+    g_task_propagate_pointer (task, error);
+    if (had_error)
         return FALSE;
     return TRUE;
 }
 
 static gchar *
-_async_finish_object_path (GAsyncResult *res,
-                           GError      **error)
+_async_finish_object_path (GTask   *task,
+                           GError **error)
 {
-    GSimpleAsyncResult *simple = (GSimpleAsyncResult *) res;
-    if (g_simple_async_result_propagate_error (simple, error))
-        return NULL;
-    GVariant *result = g_simple_async_result_get_op_res_gpointer (simple);
+    gboolean had_error = g_task_had_error (task);
+    GVariant *result = g_task_propagate_pointer (task, error);
     GVariant *variant = NULL;
-    g_return_val_if_fail (result != NULL, NULL);
     gchar *path = NULL;
+
+    if (had_error) {
+        g_assert (result == NULL);
+        return NULL;
+    }
+    g_return_val_if_fail (result != NULL, NULL);
     g_variant_get (result, "(v)", &variant);
     path = g_variant_dup_string (variant, NULL);
     g_variant_unref (variant);
+    g_variant_unref (result);
     return path;
 }
 
 static gchar *
-_async_finish_string (GAsyncResult *res,
-                      GError      **error)
+_async_finish_string (GTask   *task,
+                      GError **error)
 {
-    GSimpleAsyncResult *simple = (GSimpleAsyncResult *) res;
-    if (g_simple_async_result_propagate_error (simple, error))
-        return NULL;
-    GVariant *variant = g_simple_async_result_get_op_res_gpointer (simple);
-    g_return_val_if_fail (variant != NULL, NULL);
+    gboolean had_error = g_task_had_error (task);
+    GVariant *variant = g_task_propagate_pointer (task, error);
     gchar *s = NULL;
+
+    if (had_error) {
+        g_assert (variant == NULL);
+        return NULL;
+    }
+    g_return_val_if_fail (variant != NULL, NULL);
     g_variant_get (variant, "(&s)", &s);
+    g_variant_unref (variant);
     return s;
 }
 
 static gboolean
-_async_finish_gboolean (GAsyncResult *res,
-                        GError      **error)
+_async_finish_gboolean (GTask   *task,
+                        GError **error)
 {
-    GSimpleAsyncResult *simple = (GSimpleAsyncResult *) res;
-    if (g_simple_async_result_propagate_error (simple, error))
-        return FALSE;
-    GVariant *variant = g_simple_async_result_get_op_res_gpointer (simple);
-    g_return_val_if_fail (variant != NULL, FALSE);
+    gboolean had_error = g_task_had_error (task);
+    GVariant *variant = g_task_propagate_pointer (task, error);
     gboolean retval = FALSE;
+
+    if (had_error) {
+        g_assert (variant == NULL);
+        return FALSE;
+    }
+    g_return_val_if_fail (variant != NULL, FALSE);
     g_variant_get (variant, "(b)", &retval);
+    g_variant_unref (variant);
     return retval;
 }
 
 static guint
-_async_finish_guint (GAsyncResult *res,
-                     GError      **error)
+_async_finish_guint (GTask   *task,
+                     GError **error)
 {
+    gboolean had_error = g_task_had_error (task);
+    GVariant *variant = g_task_propagate_pointer (task, error);
     static const guint bad_id = 0;
-    GSimpleAsyncResult *simple = (GSimpleAsyncResult *) res;
-    if (g_simple_async_result_propagate_error (simple, error))
-        return bad_id;
-    GVariant *variant = g_simple_async_result_get_op_res_gpointer (simple);
-    g_return_val_if_fail (variant != NULL, bad_id);
-
     guint id = 0;
+
+    if (had_error) {
+        g_assert (variant == NULL);
+        return bad_id;
+    }
+    g_return_val_if_fail (variant != NULL, bad_id);
     g_variant_get (variant, "(u)", &id);
+    g_variant_unref (variant);
     return id;
 }
 
@@ -639,6 +819,7 @@ ibus_bus_new (void)
 {
     IBusBus *bus = IBUS_BUS (g_object_new (IBUS_TYPE_BUS,
                                            "connect-async", FALSE,
+                                           "client-only", FALSE,
                                            NULL));
 
     return bus;
@@ -649,6 +830,18 @@ ibus_bus_new_async (void)
 {
     IBusBus *bus = IBUS_BUS (g_object_new (IBUS_TYPE_BUS,
                                            "connect-async", TRUE,
+                                           "client-only", FALSE,
+                                           NULL));
+
+    return bus;
+}
+
+IBusBus *
+ibus_bus_new_async_client (void)
+{
+    IBusBus *bus = IBUS_BUS (g_object_new (IBUS_TYPE_BUS,
+                                           "connect-async", TRUE,
+                                           "client-only", TRUE,
                                            NULL));
 
     return bus;
@@ -662,7 +855,7 @@ ibus_bus_is_connected (IBusBus *bus)
     if (bus->priv->connection == NULL || g_dbus_connection_is_closed (bus->priv->connection))
         return FALSE;
 
-    return TRUE;
+    return bus->priv->connected;
 }
 
 IBusInputContext *
@@ -698,37 +891,34 @@ ibus_bus_create_input_context (IBusBus      *bus,
 }
 
 static void
-_create_input_context_async_step_two_done (GObject            *source_object,
-                                           GAsyncResult       *res,
-                                           GSimpleAsyncResult *simple)
+_create_input_context_async_step_two_done (GObject      *source_object,
+                                           GAsyncResult *res,
+                                           GTask        *task)
 {
     GError *error = NULL;
     IBusInputContext *context =
             ibus_input_context_new_async_finish (res, &error);
-    if (context == NULL) {
-        g_simple_async_result_set_from_error (simple, error);
-        g_error_free (error);
-    }
-    else {
-        g_simple_async_result_set_op_res_gpointer (simple, context, NULL);
-    }
-    g_simple_async_result_complete_in_idle (simple);
-    g_object_unref (simple);
+    if (context == NULL)
+        g_task_return_error (task, error);
+    else
+        g_task_return_pointer (task, context, NULL);
+    g_object_unref (task);
 }
 
 static void
-_create_input_context_async_step_one_done (GDBusConnection    *connection,
-                                           GAsyncResult       *res,
-                                           GSimpleAsyncResult *simple)
+_create_input_context_async_step_one_done (GDBusConnection *connection,
+                                           GAsyncResult    *res,
+                                           GTask           *task)
 {
     GError *error = NULL;
     GVariant *variant = g_dbus_connection_call_finish (connection, res, &error);
+    const gchar *path = NULL;
+    IBusBus *bus;
+    GCancellable *cancellable;
 
     if (variant == NULL) {
-        g_simple_async_result_set_from_error (simple, error);
-        g_error_free (error);
-        g_simple_async_result_complete_in_idle (simple);
-        g_object_unref (simple);
+        g_task_return_error (task, error);
+        g_object_unref (task);
         return;
     }
 
@@ -738,32 +928,24 @@ _create_input_context_async_step_one_done (GDBusConnection    *connection,
          * the asynchronous request with error.
          */
         g_variant_unref(variant);
-        g_simple_async_result_set_error (simple,
+        g_task_return_new_error (task,
                 G_DBUS_ERROR, G_DBUS_ERROR_FAILED, "Connection is closed.");
-        g_simple_async_result_complete_in_idle (simple);
         return;
     }
 
-    const gchar *path = NULL;
     g_variant_get (variant, "(&o)", &path);
     g_variant_unref(variant);
 
-
-    IBusBus *bus = (IBusBus *)g_async_result_get_source_object (
-            (GAsyncResult *)simple);
+    bus = (IBusBus *)g_task_get_source_object (task);
     g_assert (IBUS_IS_BUS (bus));
 
-    GCancellable *cancellable =
-            (GCancellable *)g_object_get_data ((GObject *)simple,
-                                               "cancellable");
+    cancellable = g_task_get_cancellable (task);
 
     ibus_input_context_new_async (path,
             bus->priv->connection,
             cancellable,
             (GAsyncReadyCallback)_create_input_context_async_step_two_done,
-            simple);
-    /* release the reference from g_async_result_get_source_object() */
-    g_object_unref (bus);
+            task);
 }
 
 void
@@ -774,19 +956,14 @@ ibus_bus_create_input_context_async (IBusBus            *bus,
                                      GAsyncReadyCallback callback,
                                      gpointer            user_data)
 {
+    GTask *task;
+
     g_return_if_fail (IBUS_IS_BUS (bus));
     g_return_if_fail (client_name != NULL);
     g_return_if_fail (callback != NULL);
 
-    GSimpleAsyncResult *simple = g_simple_async_result_new ((GObject *)bus,
-            callback, user_data, ibus_bus_create_input_context_async);
-
-    if (cancellable != NULL) {
-        g_object_set_data_full ((GObject *)simple,
-                                "cancellable",
-                                g_object_ref (cancellable),
-                                (GDestroyNotify)g_object_unref);
-    }
+    task = g_task_new (bus, cancellable, callback, user_data);
+    g_task_set_source_tag (task, ibus_bus_create_input_context_async);
 
     /* do not use ibus_bus_call_async, instread use g_dbus_connection_call
      * directly, because we need two async steps for create an IBusInputContext.
@@ -794,9 +971,9 @@ ibus_bus_create_input_context_async (IBusBus            *bus,
      * 2. New local IBusInputContext proxy of the remote IC
      */
     g_dbus_connection_call (bus->priv->connection,
-            IBUS_SERVICE_IBUS,
+            ibus_bus_get_service_name (bus),
             IBUS_PATH_IBUS,
-            IBUS_INTERFACE_IBUS,
+            bus->priv->use_portal ? IBUS_INTERFACE_PORTAL : IBUS_INTERFACE_IBUS,
             "CreateInputContext",
             g_variant_new ("(s)", client_name),
             G_VARIANT_TYPE("(o)"),
@@ -804,7 +981,7 @@ ibus_bus_create_input_context_async (IBusBus            *bus,
             timeout_msec,
             cancellable,
             (GAsyncReadyCallback)_create_input_context_async_step_one_done,
-            simple);
+            task);
 }
 
 IBusInputContext *
@@ -812,15 +989,22 @@ ibus_bus_create_input_context_async_finish (IBusBus      *bus,
                                             GAsyncResult *res,
                                             GError      **error)
 {
-    g_assert (IBUS_IS_BUS (bus));
-    g_assert (g_simple_async_result_is_valid (res, (GObject *) bus,
-                                              ibus_bus_create_input_context_async));
+    GTask *task;
+    gboolean had_error;
+    IBusInputContext *context = NULL;
 
-    GSimpleAsyncResult *simple = (GSimpleAsyncResult *) res;
-    if (g_simple_async_result_propagate_error (simple, error))
+    g_assert (IBUS_IS_BUS (bus));
+    g_assert (g_task_is_valid (res, bus));
+
+    task = G_TASK (res);
+    g_assert (g_task_get_source_tag (task) == 
+                      ibus_bus_create_input_context_async);
+    had_error = g_task_had_error (task);
+    context = g_task_propagate_pointer (task, error);
+    if (had_error) {
+        g_assert (context == NULL);
         return NULL;
-    IBusInputContext *context =
-            g_simple_async_result_get_op_res_gpointer (simple);
+    }
     g_assert (IBUS_IS_INPUT_CONTEXT (context));
     return context;
 }
@@ -883,10 +1067,15 @@ ibus_bus_current_input_context_async_finish (IBusBus      *bus,
                                              GAsyncResult *res,
                                              GError      **error)
 {
+    GTask *task;
+
     g_assert (IBUS_IS_BUS (bus));
-    g_assert (g_simple_async_result_is_valid (res, (GObject *) bus,
-                                              ibus_bus_current_input_context_async));
-    return _async_finish_object_path (res, error);
+    g_assert (g_task_is_valid (res, bus));
+
+    task = G_TASK (res);
+    g_assert(g_task_get_source_tag (task) ==
+                     ibus_bus_current_input_context_async);
+    return _async_finish_object_path (task, error);
 }
 
 static void
@@ -1060,10 +1249,14 @@ ibus_bus_request_name_async_finish (IBusBus      *bus,
                                     GAsyncResult *res,
                                     GError      **error)
 {
+    GTask *task;
+
     g_assert (IBUS_IS_BUS (bus));
-    g_assert (g_simple_async_result_is_valid (res, (GObject *) bus,
-                                              ibus_bus_request_name_async));
-    return _async_finish_guint (res, error);
+    g_assert (g_task_is_valid (res, bus));
+
+    task = G_TASK (res);
+    g_assert(g_task_get_source_tag (task) == ibus_bus_request_name_async);
+    return _async_finish_guint (task, error);
 }
 
 guint
@@ -1121,10 +1314,14 @@ ibus_bus_release_name_async_finish (IBusBus      *bus,
                                     GAsyncResult *res,
                                     GError      **error)
 {
+    GTask *task;
+
     g_assert (IBUS_IS_BUS (bus));
-    g_assert (g_simple_async_result_is_valid (res, (GObject *) bus,
-                                              ibus_bus_release_name_async));
-    return _async_finish_guint (res, error);
+    g_assert (g_task_is_valid (res, bus));
+
+    task = G_TASK (res);
+    g_assert(g_task_get_source_tag (task) == ibus_bus_release_name_async);
+    return _async_finish_guint (task, error);
 }
 
 GList *
@@ -1217,10 +1414,14 @@ ibus_bus_name_has_owner_async_finish (IBusBus      *bus,
                                       GAsyncResult *res,
                                       GError      **error)
 {
+    GTask *task;
+
     g_assert (IBUS_IS_BUS (bus));
-    g_assert (g_simple_async_result_is_valid (res, (GObject *) bus,
-                                              ibus_bus_name_has_owner_async));
-    return _async_finish_gboolean (res, error);
+    g_assert (g_task_is_valid (res, bus));
+
+    task = G_TASK (res);
+    g_assert(g_task_get_source_tag (task) == ibus_bus_name_has_owner_async);
+    return _async_finish_gboolean (task, error);
 }
 
 GList *
@@ -1283,10 +1484,14 @@ ibus_bus_add_match_async_finish (IBusBus      *bus,
                                  GAsyncResult *res,
                                  GError      **error)
 {
+    GTask *task;
+
     g_assert (IBUS_IS_BUS (bus));
-    g_assert (g_simple_async_result_is_valid (res, (GObject *) bus,
-                                              ibus_bus_add_match_async));
-    return _async_finish_void (res, error);
+    g_assert (g_task_is_valid (res, bus));
+
+    task = G_TASK (res);
+    g_assert(g_task_get_source_tag (task) == ibus_bus_add_match_async);
+    return _async_finish_void (task, error);
 }
 
 gboolean
@@ -1342,10 +1547,14 @@ ibus_bus_remove_match_async_finish (IBusBus      *bus,
                                     GAsyncResult *res,
                                     GError      **error)
 {
+    GTask *task;
+
     g_assert (IBUS_IS_BUS (bus));
-    g_assert (g_simple_async_result_is_valid (res, (GObject *) bus,
-                                              ibus_bus_remove_match_async));
-    return _async_finish_void (res, error);
+    g_assert (g_task_is_valid (res, bus));
+
+    task = G_TASK (res);
+    g_assert(g_task_get_source_tag (task) == ibus_bus_remove_match_async);
+    return _async_finish_void (task, error);
 }
 
 gchar *
@@ -1403,10 +1612,14 @@ ibus_bus_get_name_owner_async_finish (IBusBus      *bus,
                                       GAsyncResult *res,
                                       GError      **error)
 {
+    GTask *task;
+
     g_assert (IBUS_IS_BUS (bus));
-    g_assert (g_simple_async_result_is_valid (res, (GObject *) bus,
-                                              ibus_bus_get_name_owner_async));
-    return g_strdup (_async_finish_string (res, error));
+    g_assert (g_task_is_valid (res, bus));
+
+    task = G_TASK (res);
+    g_assert(g_task_get_source_tag (task) == ibus_bus_get_name_owner_async);
+    return g_strdup (_async_finish_string (task, error));
 }
 
 GDBusConnection *
@@ -1415,6 +1628,14 @@ ibus_bus_get_connection (IBusBus *bus)
     g_return_val_if_fail (IBUS_IS_BUS (bus), NULL);
 
     return bus->priv->connection;
+}
+
+const gchar *
+ibus_bus_get_service_name (IBusBus *bus)
+{
+    if (bus->priv->use_portal)
+        return IBUS_SERVICE_PORTAL;
+    return IBUS_SERVICE_IBUS;
 }
 
 gboolean
@@ -1470,10 +1691,14 @@ ibus_bus_exit_async_finish (IBusBus      *bus,
                             GAsyncResult *res,
                             GError      **error)
 {
+    GTask *task;
+
     g_assert (IBUS_IS_BUS (bus));
-    g_assert (g_simple_async_result_is_valid (res, (GObject *) bus,
-                                              ibus_bus_exit_async));
-    return _async_finish_void (res, error);
+    g_assert (g_task_is_valid (res, bus));
+
+    task = G_TASK (res);
+    g_assert (g_task_get_source_tag (task) == ibus_bus_exit_async);
+    return _async_finish_void (task, error);
 }
 
 gboolean
@@ -1529,10 +1754,15 @@ ibus_bus_register_component_async_finish (IBusBus      *bus,
                                           GAsyncResult *res,
                                           GError      **error)
 {
+    GTask *task;
+
     g_assert (IBUS_IS_BUS (bus));
-    g_assert (g_simple_async_result_is_valid (res, (GObject *) bus,
-                                              ibus_bus_register_component_async));
-    return _async_finish_void (res, error);
+    g_assert (g_task_is_valid (res, bus));
+
+    task = G_TASK (res);
+    g_assert (
+            g_task_get_source_tag (task) == ibus_bus_register_component_async);
+    return _async_finish_void (task, error);
 }
 
 static GList *
@@ -1610,18 +1840,27 @@ ibus_bus_list_engines_async_finish (IBusBus      *bus,
                                     GAsyncResult *res,
                                     GError      **error)
 {
-    GSimpleAsyncResult *simple = (GSimpleAsyncResult *) res;
-    if (g_simple_async_result_propagate_error (simple, error))
-        return NULL;
-    GVariant *result = g_simple_async_result_get_op_res_gpointer (simple);
-    g_return_val_if_fail (result != NULL, NULL);
-
+    GTask *task;
+    gboolean had_error;
+    GVariant *result = NULL;
     GVariant *variant = NULL;
     GList *retval = NULL;
     GVariantIter *iter = NULL;
+    GVariant *var;
+
+    g_assert (g_task_is_valid (res, bus));
+
+    task = G_TASK (res);
+    had_error = g_task_had_error (task);
+    result = g_task_propagate_pointer (task, error);
+    if (had_error) {
+        g_assert (result == NULL);
+        return NULL;
+    }
+    g_return_val_if_fail (result != NULL, NULL);
+
     g_variant_get (result, "(v)", &variant);
     iter = g_variant_iter_new (variant);
-    GVariant *var;
     while (g_variant_iter_loop (iter, "v", &var)) {
         IBusSerializable *serializable = ibus_serializable_deserialize (var);
         g_object_ref_sink (serializable);
@@ -1629,6 +1868,7 @@ ibus_bus_list_engines_async_finish (IBusBus      *bus,
     }
     g_variant_iter_free (iter);
     g_variant_unref (variant);
+    g_variant_unref (result);
     return retval;
 }
 
@@ -1789,11 +2029,14 @@ ibus_bus_get_use_sys_layout_async_finish (IBusBus      *bus,
                                           GAsyncResult *res,
                                           GError      **error)
 {
+    GTask *task;
+
     g_assert (IBUS_IS_BUS (bus));
-    g_assert (g_simple_async_result_is_valid (
-                      res, (GObject *) bus,
-                      ibus_bus_get_use_sys_layout_async));
-    return _async_finish_gboolean (res, error);
+    g_assert (g_task_is_valid (res, bus));
+
+    task = G_TASK (res);
+    g_assert(g_task_get_source_tag (task) == ibus_bus_get_use_sys_layout_async);
+    return _async_finish_gboolean (task, error);
 }
 
 gboolean
@@ -1847,11 +2090,15 @@ ibus_bus_get_use_global_engine_async_finish (IBusBus      *bus,
                                              GAsyncResult *res,
                                              GError      **error)
 {
+    GTask *task;
+
     g_assert (IBUS_IS_BUS (bus));
-    g_assert (g_simple_async_result_is_valid (
-                      res, (GObject *) bus,
-                      ibus_bus_get_use_global_engine_async));
-    return _async_finish_gboolean (res, error);
+    g_assert (g_task_is_valid (res, bus));
+
+    task = G_TASK (res);
+    g_assert(g_task_get_source_tag (task) ==
+                     ibus_bus_get_use_global_engine_async);
+    return _async_finish_gboolean (task, error);
 }
 
 gboolean
@@ -1903,11 +2150,15 @@ gboolean ibus_bus_is_global_engine_enabled_async_finish (IBusBus      *bus,
                                                          GAsyncResult *res,
                                                          GError      **error)
 {
+    GTask *task;
+
     g_assert (IBUS_IS_BUS (bus));
-    g_assert (g_simple_async_result_is_valid (
-                      res, (GObject *) bus,
-                      ibus_bus_is_global_engine_enabled_async));
-    return _async_finish_gboolean (res, error);
+    g_assert (g_task_is_valid (res, bus));
+
+    task = G_TASK (res);
+    g_assert(g_task_get_source_tag (task) ==
+                     ibus_bus_is_global_engine_enabled_async);
+    return _async_finish_gboolean (task, error);
 }
 #endif /* IBUS_DISABLE_DEPRECATED */
 
@@ -1973,10 +2224,19 @@ ibus_bus_get_global_engine_async_finish (IBusBus      *bus,
                                          GAsyncResult *res,
                                          GError      **error)
 {
-    GSimpleAsyncResult *simple = (GSimpleAsyncResult *) res;
-    if (g_simple_async_result_propagate_error (simple, error))
+    GTask *task;
+    gboolean had_error;
+    GVariant *result = NULL;
+
+    g_assert (g_task_is_valid (res, bus));
+
+    task = G_TASK (res);
+    had_error = g_task_had_error (task);
+    result = g_task_propagate_pointer (task, error);
+    if (had_error) {
+        g_assert (result == NULL);
         return NULL;
-    GVariant *result = g_simple_async_result_get_op_res_gpointer (simple);
+    }
     g_return_val_if_fail (result != NULL, NULL);
     GVariant *variant = NULL;
     g_variant_get (result, "(v)", &variant);
@@ -1988,6 +2248,7 @@ ibus_bus_get_global_engine_async_finish (IBusBus      *bus,
         g_variant_unref (obj);
         g_variant_unref (variant);
     }
+    g_variant_unref (result);
     return engine;
 }
 
@@ -2044,10 +2305,14 @@ ibus_bus_set_global_engine_async_finish (IBusBus      *bus,
                                          GAsyncResult *res,
                                          GError      **error)
 {
+    GTask *task;
+
     g_assert (IBUS_IS_BUS (bus));
-    g_assert (g_simple_async_result_is_valid (res, (GObject *) bus,
-                                              ibus_bus_set_global_engine_async));
-    return _async_finish_void (res, error);
+    g_assert (g_task_is_valid (res, bus));
+
+    task = G_TASK (res);
+    g_assert (g_task_get_source_tag (task) == ibus_bus_set_global_engine_async);
+    return _async_finish_void (task, error);
 }
 
 gboolean
@@ -2116,11 +2381,14 @@ ibus_bus_preload_engines_async_finish (IBusBus       *bus,
                                        GAsyncResult  *res,
                                        GError       **error)
 {
+    GTask *task;
+
     g_assert (IBUS_IS_BUS (bus));
-    g_assert (g_simple_async_result_is_valid (
-            res, (GObject *) bus,
-            ibus_bus_preload_engines_async));
-    return _async_finish_void (res, error);
+    g_assert (g_task_is_valid (res, bus));
+
+    task = G_TASK (res);
+    g_assert (g_task_get_source_tag (task) == ibus_bus_preload_engines_async);
+    return _async_finish_void (task, error);
 }
 
 GVariant *
@@ -2183,13 +2451,23 @@ ibus_bus_get_ibus_property_async_finish (IBusBus      *bus,
                                          GAsyncResult *res,
                                          GError      **error)
 {
-    GSimpleAsyncResult *simple = (GSimpleAsyncResult *) res;
-    if (g_simple_async_result_propagate_error (simple, error))
+    GTask *task;
+    gboolean had_error;
+    GVariant *result = NULL;
+
+    g_assert (g_task_is_valid (res, bus));
+
+    task = G_TASK (res);
+    had_error = g_task_had_error (task);
+    result = g_task_propagate_pointer (task, error);
+    if (had_error) {
+        g_assert (result == NULL);
         return NULL;
-    GVariant *result = g_simple_async_result_get_op_res_gpointer (simple);
+    }
     g_return_val_if_fail (result != NULL, NULL);
     GVariant *retval = NULL;
     g_variant_get (result, "(v)", &retval);
+    g_variant_unref (result);
 
     return retval;
 }
@@ -2254,11 +2532,15 @@ ibus_bus_set_ibus_property_async_finish (IBusBus       *bus,
                                          GAsyncResult  *res,
                                          GError       **error)
 {
+    GTask *task;
     g_assert (IBUS_IS_BUS (bus));
-    g_assert (g_simple_async_result_is_valid (
-            res, (GObject *) bus,
-            ibus_bus_set_ibus_property_async));
-    return _async_finish_void (res, error);
+    g_assert (g_task_is_valid (res, bus));
+
+    task = G_TASK (res);
+    g_return_val_if_fail (
+            g_task_get_source_tag (task) == ibus_bus_set_ibus_property_async,
+            FALSE);
+    return _async_finish_void (task, error);
 }
 
 static GVariant *
@@ -2273,6 +2555,13 @@ ibus_bus_call_sync (IBusBus            *bus,
     g_assert (IBUS_IS_BUS (bus));
     g_assert (member != NULL);
     g_return_val_if_fail (ibus_bus_is_connected (bus), NULL);
+
+    if (bus->priv->use_portal &&
+        g_strcmp0 (bus_name, IBUS_SERVICE_IBUS) == 0)  {
+        bus_name = IBUS_SERVICE_PORTAL;
+        if (g_strcmp0 (interface, IBUS_INTERFACE_IBUS) == 0)
+            interface = IBUS_INTERFACE_PORTAL;
+    }
 
     GError *error = NULL;
     GVariant *result;
@@ -2302,23 +2591,20 @@ ibus_bus_call_async_done (GDBusConnection *connection,
                           GAsyncResult    *res,
                           gpointer         user_data)
 {
+    GTask *task;
+    GError *error = NULL;
+    GVariant *variant;
+
     g_assert (G_IS_DBUS_CONNECTION (connection));
 
-    GSimpleAsyncResult *simple = (GSimpleAsyncResult *) user_data;
-    GError *error = NULL;
-    GVariant *variant = g_dbus_connection_call_finish (connection, res, &error);
+    task = (GTask* ) user_data;
+    variant = g_dbus_connection_call_finish (connection, res, &error);
 
-    if (variant == NULL) {
-        /* Replace with g_simple_async_result_take_error in glib 2.28 */
-        g_simple_async_result_set_from_error (simple, error);
-        g_error_free (error);
-    }
-    else {
-        g_simple_async_result_set_op_res_gpointer (simple, variant,
-                                                   (GDestroyNotify) g_variant_unref);
-    }
-    g_simple_async_result_complete (simple);
-    g_object_unref (simple);
+    if (variant == NULL)
+        g_task_return_error (task, error);
+    else
+        g_task_return_pointer (task, variant, (GDestroyNotify) g_variant_unref);
+    g_object_unref (task);
 }
 
 static void
@@ -2335,14 +2621,21 @@ ibus_bus_call_async (IBusBus            *bus,
                      GAsyncReadyCallback callback,
                      gpointer            user_data)
 {
+    GTask *task;
+
     g_assert (IBUS_IS_BUS (bus));
     g_assert (member != NULL);
     g_return_if_fail (ibus_bus_is_connected (bus));
 
-    GSimpleAsyncResult *simple = g_simple_async_result_new ((GObject*) bus,
-                                                            callback,
-                                                            user_data,
-                                                            source_tag);
+    task = g_task_new (bus, cancellable, callback, user_data);
+    g_task_set_source_tag (task, source_tag);
+
+    if (bus->priv->use_portal &&
+        g_strcmp0 (bus_name, IBUS_SERVICE_IBUS) == 0)  {
+        bus_name = IBUS_SERVICE_PORTAL;
+        if (g_strcmp0 (interface, IBUS_INTERFACE_IBUS) == 0)
+            interface = IBUS_INTERFACE_PORTAL;
+    }
 
     g_dbus_connection_call (bus->priv->connection,
                             bus_name,
@@ -2355,5 +2648,5 @@ ibus_bus_call_async (IBusBus            *bus,
                             timeout_msec,
                             cancellable,
                             (GAsyncReadyCallback) ibus_bus_call_async_done,
-                            simple);
+                            task);
 }

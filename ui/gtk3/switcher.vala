@@ -2,7 +2,8 @@
  *
  * ibus - The Input Bus
  *
- * Copyright(c) 2011-2014 Peng Huang <shawn.p.huang@gmail.com>
+ * Copyright(c) 2011-2016 Peng Huang <shawn.p.huang@gmail.com>
+ * Copyright(c) 2015-2017 Takao Fujiwara <takao.fujiwara1@gmail.com>
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -25,8 +26,10 @@ class Switcher : Gtk.Window {
         public IBusEngineButton(IBus.EngineDesc engine, Switcher switcher) {
             GLib.Object();
 
-            this.longname = engine.get_longname();
-            debug("[hgneng] IBusEngineButton: %s", this.longname);
+            var longname = engine.get_longname();
+            debug("[hgneng] IBusEngineButton: %s", longname);
+            var textdomain = engine.get_textdomain();
+            this.transname = GLib.dgettext(textdomain, longname);
 
             var name = engine.get_name();
 
@@ -58,7 +61,7 @@ class Switcher : Gtk.Window {
             }
         }
 
-        public string longname { get; set; }
+        public string transname { get; set; }
 
         public override bool draw(Cairo.Context cr) {
             base.draw(cr);
@@ -82,12 +85,18 @@ class Switcher : Gtk.Window {
     private uint m_keyval;
     private uint m_modifiers;
     private Gdk.ModifierType m_primary_modifier;
+    private bool m_is_running = false;
+    private string m_input_context_path = "";
     private GLib.MainLoop m_loop;
-    private int m_result;
+    private int m_result = -1;
+    private IBus.EngineDesc? m_result_engine = null;
     private uint m_popup_delay_time = 0;
     private uint m_popup_delay_time_id = 0;
     private int m_root_x;
     private int m_root_y;
+    private double m_mouse_init_x;
+    private double m_mouse_init_y;
+    private bool   m_mouse_moved;
     private GLib.HashTable<string, string> m_xkb_languages =
             new GLib.HashTable<string, string>(GLib.str_hash,
                                                GLib.str_equal);
@@ -125,55 +134,33 @@ class Switcher : Gtk.Window {
         grab_focus();
     }
 
-    public int run(uint keyval,
-                   uint state,
-                   Gdk.Event event,
+    public int run(uint              keyval,
+                   uint              state,
+                   Gdk.Event         event,
                    IBus.EngineDesc[] engines,
-                   int index) {
+                   int               index,
+                   string            input_context_path) {
         assert (m_loop == null);
         assert (index < engines.length);
 
+        m_is_running = true;
         m_keyval = keyval;
         m_modifiers = state;
         m_primary_modifier =
             KeybindingManager.get_primary_modifier(
                 state & KeybindingManager.MODIFIER_FILTER);
+        m_selected_engine = m_result = index;
+        m_input_context_path = input_context_path;
+        m_result_engine = null;
 
         update_engines(engines);
         /* Let gtk recalculate the window size. */
         resize(1, 1);
 
-        m_selected_engine = index;
-        m_label.set_text(m_buttons[index].longname);
+        m_label.set_text(m_buttons[index].transname);
         m_buttons[index].grab_focus();
 
         debug("[hgneng] next_engine: %s", m_buttons[m_selected_engine].longname);
-
-        Gdk.Device device = event.get_device();
-        if (device == null) {
-            var display = get_display();
-            var device_manager = display.get_device_manager();
-/* The macro VALA_X_Y supports even numbers.
- * http://git.gnome.org/browse/vala/commit/?id=294b374af6
- */
-#if VALA_0_16
-            device = device_manager.list_devices(Gdk.DeviceType.MASTER).data;
-#else
-            unowned GLib.List<Gdk.Device> devices =
-                    device_manager.list_devices(Gdk.DeviceType.MASTER);
-            device = devices.data;
-#endif
-        }
-
-        Gdk.Device keyboard;
-        Gdk.Device pointer;
-        if (device.get_source() == Gdk.InputSource.KEYBOARD) {
-            keyboard = device;
-            pointer = device.get_associated_device();
-        } else {
-            pointer = device;
-            keyboard = device.get_associated_device();
-        }
 
         // Avoid regressions.
         if (m_popup_delay_time > 0) {
@@ -193,6 +180,60 @@ class Switcher : Gtk.Window {
                 restore_window_position("timeout");
                 return false;
             });
+        }
+
+        Gdk.Device pointer;
+#if VALA_0_34
+        Gdk.Seat seat = event.get_seat();
+        if (seat == null) {
+            var display = get_display();
+            seat = display.get_default_seat();
+        }
+        //keyboard = seat.get_keyboard();
+        pointer = seat.get_pointer();
+
+        Gdk.GrabStatus status;
+        // Grab all keyboard events
+        status = seat.grab(get_window(),
+                           Gdk.SeatCapabilities.KEYBOARD,
+                           true,
+                           null,
+                           event,
+                           null);
+        if (status != Gdk.GrabStatus.SUCCESS)
+            warning("Grab keyboard failed! status = %d", status);
+        status = seat.grab(get_window(),
+                           Gdk.SeatCapabilities.POINTER,
+                           true,
+                           null,
+                           event,
+                           null);
+        if (status != Gdk.GrabStatus.SUCCESS)
+            warning("Grab pointer failed! status = %d", status);
+#else
+        Gdk.Device device = event.get_device();
+        if (device == null) {
+            var display = get_display();
+            var device_manager = display.get_device_manager();
+/* The macro VALA_X_Y supports even numbers.
+ * http://git.gnome.org/browse/vala/commit/?id=294b374af6
+ */
+#if VALA_0_16
+            device = device_manager.list_devices(Gdk.DeviceType.MASTER).data;
+#else
+            unowned GLib.List<Gdk.Device> devices =
+                    device_manager.list_devices(Gdk.DeviceType.MASTER);
+            device = devices.data;
+#endif
+        }
+
+        Gdk.Device keyboard;
+        if (device.get_source() == Gdk.InputSource.KEYBOARD) {
+            keyboard = device;
+            pointer = device.get_associated_device();
+        } else {
+            pointer = device;
+            keyboard = device.get_associated_device();
         }
 
         Gdk.GrabStatus status;
@@ -216,19 +257,34 @@ class Switcher : Gtk.Window {
                               Gdk.CURRENT_TIME);
         if (status != Gdk.GrabStatus.SUCCESS)
             warning("Grab pointer failed! status = %d", status);
+#endif
+
+        // Probably we can delete m_popup_delay_time in 1.6
+        pointer.get_position_double(null,
+                                    out m_mouse_init_x,
+                                    out m_mouse_init_y);
+        m_mouse_moved = false;
 
 
         m_loop = new GLib.MainLoop();
         m_loop.run();
         m_loop = null;
 
+#if VALA_0_34
+        seat.ungrab();
+#else
         keyboard.ungrab(Gdk.CURRENT_TIME);
         pointer.ungrab(Gdk.CURRENT_TIME);
+#endif
 
         hide();
         // Make sure the switcher is hidden before returning from this function.
         while (Gtk.events_pending())
             Gtk.main_iteration ();
+
+        GLib.assert(m_result < m_engines.length);
+        m_result_engine = m_engines[m_result];
+        m_is_running = false;
 
         return m_result;
     }
@@ -254,13 +310,33 @@ class Switcher : Gtk.Window {
             var button = new IBusEngineButton(engine, this);
             var longname = engine.get_longname();
             debug("[hgneng] update_engines: %s", longname);
+            var textdomain = engine.get_textdomain();
+            var transname = GLib.dgettext(textdomain, longname);
             button.set_relief(Gtk.ReliefStyle.NONE);
+            button.add_events(Gdk.EventMask.POINTER_MOTION_MASK);
             button.show();
 
             button.enter_notify_event.connect((e) => {
+                // avoid gtk_button_update_state()
+                return true;
+            });
+            button.motion_notify_event.connect((e) => {
+#if VALA_0_24
+                Gdk.EventMotion pe = e;
+#else
+                Gdk.EventMotion *pe = &e;
+#endif
+                if (m_selected_engine == index)
+                    return false;
+                if (!m_mouse_moved &&
+                    m_mouse_init_x == pe.x_root &&
+                    m_mouse_init_y == pe.y_root) {
+                    return false;
+                }
+                m_mouse_moved = true;
                 button.grab_focus();
                 m_selected_engine = index;
-                return true;
+                return false;
             });
 
             button.button_press_event.connect((e) => {
@@ -270,8 +346,8 @@ class Switcher : Gtk.Window {
                 return true;
             });
 
-            button.longname = longname;
-            m_label.set_label(longname);
+            button.transname = transname;
+            m_label.set_label(transname);
 
             int width;
             m_label.get_preferred_width(null, out width);
@@ -281,17 +357,24 @@ class Switcher : Gtk.Window {
             m_buttons += button;
         }
 
-        m_label.set_text(m_buttons[0].longname);
+        m_label.set_text(m_buttons[0].transname);
         m_label.set_ellipsize(Pango.EllipsizeMode.END);
 
         Gdk.Display display = Gdk.Display.get_default();
+        int screen_width = 0;
+#if VALA_0_34
+        // display.get_monitor_at_window() is null because of unrealized window
+        Gdk.Monitor monitor = display.get_primary_monitor();
+        Gdk.Rectangle area = monitor.get_geometry();
+        screen_width = area.width;
+#else
         Gdk.Screen screen = (display != null) ?
                 display.get_default_screen() : null;
-        int screen_width = 0;
 
         if (screen != null) {
             screen_width = screen.get_width();
         }
+#endif
 
         if (screen_width > 0 && max_label_width > (screen_width / 4)) {
             max_label_width = screen_width / 4;
@@ -307,7 +390,7 @@ class Switcher : Gtk.Window {
             m_selected_engine = 0;
         else
             m_selected_engine ++;
-        m_label.set_text(m_buttons[m_selected_engine].longname);
+        m_label.set_text(m_buttons[m_selected_engine].transname);
         set_focus(m_buttons[m_selected_engine]);
 
         debug("[hgneng] next_engine: %s", m_buttons[m_selected_engine].longname);
@@ -318,7 +401,7 @@ class Switcher : Gtk.Window {
             m_selected_engine = m_engines.length - 1;
         else
             m_selected_engine --;
-        m_label.set_text(m_buttons[m_selected_engine].longname);
+        m_label.set_text(m_buttons[m_selected_engine].transname);
         set_focus(m_buttons[m_selected_engine]);
     }
 
@@ -440,17 +523,18 @@ class Switcher : Gtk.Window {
             return language;
 
         language = engine.get_language();
+        int length = language.length;
 
         /* Maybe invalid layout */
-        if (language.length < 2)
+        if (length < 2)
             return language;
 
-        language = language[0:2].up();
+        language = language.up();
 
         int index = 0;
 
         foreach (var saved_language in m_xkb_languages.get_values()) {
-            if (language == saved_language[0:2])
+            if (language == saved_language[0:length])
                 index++;
         }
 
@@ -461,5 +545,23 @@ class Switcher : Gtk.Window {
 
         m_xkb_languages.insert(name, language);
         return language;
+    }
+
+    public bool is_running() {
+        return m_is_running;
+    }
+
+    public string get_input_context_path() {
+        return m_input_context_path;
+    }
+
+    public IBus.EngineDesc? get_selected_engine() {
+        return m_result_engine;
+    }
+
+    public void reset() {
+        m_input_context_path = "";
+        m_result = -1;
+        m_result_engine = null;
     }
 }

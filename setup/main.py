@@ -1,9 +1,11 @@
 # vim:set et sts=4 sw=4:
+# -*- coding: utf-8 -*-
 #
 # ibus - The Input Bus
 #
-# Copyright (c) 2007-2015 Peng Huang <shawn.p.huang@gmail.com>
-# Copyright (c) 2007-2015 Red Hat, Inc.
+# Copyright (c) 2007-2016 Peng Huang <shawn.p.huang@gmail.com>
+# Copyright (c) 2010-2017 Takao Fujiwara <takao.fujiwara1@gmail.com>
+# Copyright (c) 2007-2016 Red Hat, Inc.
 #
 # This library is free software; you can redistribute it and/or
 # modify it under the terms of the GNU Lesser General Public
@@ -28,6 +30,13 @@ import signal
 import sys
 import time
 
+from gi import require_version as gi_require_version
+gi_require_version('GLib', '2.0')
+gi_require_version('GdkX11', '3.0')
+gi_require_version('Gio', '2.0')
+gi_require_version('Gtk', '3.0')
+gi_require_version('IBus', '1.0')
+
 from gi.repository import GLib
 # set_prgname before importing other modules to show the name in warning
 # messages when import modules are failed.
@@ -42,6 +51,7 @@ from os import path
 import i18n
 import keyboardshortcut
 import locale
+from emojilang import EmojiLangButton
 from enginecombobox import EngineComboBox
 from enginedialog import EngineDialog
 from enginetreeview import EngineTreeView
@@ -83,6 +93,8 @@ class Setup(object):
                 schema = "org.freedesktop.ibus.general.hotkey");
         self.__settings_panel = Gio.Settings(
                 schema = "org.freedesktop.ibus.panel");
+        self.__settings_emoji = Gio.Settings(
+                schema = "org.freedesktop.ibus.panel.emoji");
 
         # IBus.Bus() calls ibus_bus_new().
         # Gtk.Builder().add_from_file() also calls ibus_bus_new_async()
@@ -102,19 +114,34 @@ class Setup(object):
         self.__builder.add_from_file(gtk_builder_file);
         self.__init_ui()
 
-    def __init_hotkey(self):
+    def __init_hotkeys(self):
         name = 'triggers'
         label = 'switch_engine'
-        shortcuts = self.__settings_hotkey.get_strv(name)
+        comment = \
+            _("Use shortcut with shift to switch to the previous input method") 
+        self.__init_hotkey(name, label, comment)
+        name = 'emoji'
+        label = 'emoji_dialog'
+        self.__init_hotkey(name, label)
+
+    def __init_hotkey(self, name, label, comment=None):
+        if name == 'emoji':
+            shortcuts = self.__settings_emoji.get_strv('hotkey')
+        else:
+            shortcuts = self.__settings_hotkey.get_strv(name)
         button = self.__builder.get_object("button_%s" % label)
         entry = self.__builder.get_object("entry_%s" % label)
         entry.set_text("; ".join(shortcuts))
         tooltip = "\n".join(shortcuts)
-        tooltip += "\n" + \
-            _("Use shortcut with shift to switch to the previous input method") 
+        if comment != None:
+            tooltip += "\n" + comment
         entry.set_tooltip_text(tooltip)
-        button.connect("clicked", self.__shortcut_button_clicked_cb,
-                name, "general/hotkey", label, entry)
+        if name == 'emoji':
+            button.connect("clicked", self.__shortcut_button_clicked_cb,
+                    'hotkey', 'panel/' + name, label, entry)
+        else:
+            button.connect("clicked", self.__shortcut_button_clicked_cb,
+                    name, "general/hotkey", label, entry)
 
     def __init_panel(self):
         # lookup table orientation
@@ -247,6 +274,113 @@ class Setup(object):
         self.__treeview.connect("notify::active-engine", self.__treeview_notify_cb)
         self.__treeview.connect("notify::engines", self.__treeview_notify_cb)
 
+    def __init_emoji(self):
+        self.__fontbutton_emoji_font = self.__builder.get_object(
+                'fontbutton_emoji_font')
+        self.__fontbutton_emoji_font.set_preview_text('🙂🍎🚃💓📧⚽🐳');
+        self.__settings_emoji.bind('font',
+                                    self.__fontbutton_emoji_font,
+                                   'font-name',
+                                   Gio.SettingsBindFlags.DEFAULT)
+        self.__button_emoji_lang = self.__builder.get_object(
+                'button_emoji_lang')
+        self.__settings_emoji.bind('lang',
+                                    self.__button_emoji_lang,
+                                   'lang',
+                                   Gio.SettingsBindFlags.DEFAULT)
+        self.__checkbutton_emoji_partial_match = self.__builder.get_object(
+                'checkbutton_emoji_partial_match')
+        checkbutton_label = self.__checkbutton_emoji_partial_match.get_child()
+        if type(checkbutton_label) == Gtk.Label:
+            checkbutton_label.set_property('wrap', True)
+            checkbutton_label.set_property('max-width-chars', 74)
+        self.__spinbutton_emoji_partial_match = self.__builder.get_object(
+                'spinbutton_emoji_partial_match')
+        self.__settings_emoji.bind('has-partial-match',
+                                   self.__checkbutton_emoji_partial_match,
+                                   'active',
+                                   Gio.SettingsBindFlags.DEFAULT)
+        self.__settings_emoji.bind('has-partial-match',
+                                   self.__spinbutton_emoji_partial_match,
+                                   'sensitive',
+                                   Gio.SettingsBindFlags.GET)
+
+        def adjustment_value_changed_cb(obj):
+            key = 'partial-match-length'
+            value = int(adjustment.get_value())
+            if value == self.__settings_emoji.get_int(key):
+                return
+            self.__settings_emoji.set_int(key, value)
+        def settings_emoji_partial_match_length_cb(settings, key):
+            value = self.__settings_emoji.get_int(key)
+            old_value = int(self.__spinbutton_emoji_partial_match.get_value())
+            if value == old_value:
+                return
+            self.__spinbutton_emoji_partial_match.set_value(value)
+        settings_emoji_partial_match_length_cb(None, 'partial-match-length')
+        adjustment = self.__spinbutton_emoji_partial_match.get_adjustment()
+        adjustment.connect('value-changed', adjustment_value_changed_cb)
+        self.__settings_emoji.connect('changed::partial-match-length',
+                                      settings_emoji_partial_match_length_cb)
+
+        self.__hbox_emoji_partial_match = self.__builder.get_object(
+                'hbox_emoji_partial_match')
+        self.__settings_emoji.bind('has-partial-match',
+                                   self.__hbox_emoji_partial_match,
+                                   'sensitive',
+                                   Gio.SettingsBindFlags.GET)
+        self.__radiobutton_emoji_prefix_match = self.__builder.get_object(
+                'radiobutton_emoji_prefix_match')
+        self.__radiobutton_emoji_suffix_match = self.__builder.get_object(
+                'radiobutton_emoji_suffix_match')
+        self.__radiobutton_emoji_contain_match = self.__builder.get_object(
+                'radiobutton_emoji_contain_match')
+
+        def radiobuton_emoji_partial_match_cb(obj):
+            key = 'partial-match-condition'
+            condition = 0
+            if not obj.get_active():
+                return
+            if obj == self.__radiobutton_emoji_prefix_match:
+                condition = 0
+            elif obj == self.__radiobutton_emoji_suffix_match:
+                condition = 1
+            elif obj == self.__radiobutton_emoji_contain_match:
+                condition = 2
+            else:
+                print('Wrong emoji partial match object')
+                return
+            self.__settings_emoji.set_int(key, condition)
+        def settings_emoji_partial_match_condition_cb(settings, key):
+            value = self.__settings_emoji.get_int(key)
+            obj = None
+            if value == 0:
+                obj = self.__radiobutton_emoji_prefix_match
+            elif value == 1:
+                obj = self.__radiobutton_emoji_suffix_match
+            elif value == 2:
+                obj = self.__radiobutton_emoji_contain_match
+            else:
+                print('Wrong emoji partial match condition')
+                return
+            if obj.get_active():
+                return
+            obj.set_active(True)
+
+        settings_emoji_partial_match_condition_cb(None,
+                                                  'partial-match-condition')
+        self.__radiobutton_emoji_prefix_match.connect(
+                'toggled',
+                radiobuton_emoji_partial_match_cb)
+        self.__radiobutton_emoji_suffix_match.connect(
+                'toggled',
+                radiobuton_emoji_partial_match_cb)
+        self.__radiobutton_emoji_contain_match.connect(
+                'toggled',
+                radiobuton_emoji_partial_match_cb)
+        self.__settings_emoji.connect('changed::partial-match-condition',
+                                      settings_emoji_partial_match_condition_cb)
+
     def __init_ui(self):
         # add icon search path
         self.__window = self.__builder.get_object("window_preferences")
@@ -263,13 +397,17 @@ class Setup(object):
         self.__checkbutton_auto_start.connect("toggled",
                 self.__checkbutton_auto_start_toggled_cb)
 
-        self.__init_hotkey()
+        self.__init_hotkeys()
         self.__init_panel()
         self.__init_general()
+        self.__init_emoji()
 
     def __gdk_window_set_cb(self, object, pspec):
-        str = '%u' % GdkX11.X11Window.get_xid(object.get_window())
-        GLib.setenv('IBUS_SETUP_XID', str, True)
+        window = object.get_window()
+        if type(window) != GdkX11.X11Window:
+            return
+        s = '%u' % GdkX11.X11Window.get_xid(window)
+        GLib.setenv('IBUS_SETUP_XID', s, True)
 
     def __combobox_notify_active_engine_cb(self, combobox, property):
         engine = self.__combobox.get_active_engine()
@@ -431,7 +569,10 @@ class Setup(object):
         dialog.destroy()
         if id != Gtk.ResponseType.OK:
             return
-        self.__settings_hotkey.set_strv(name, shortcuts)
+        if section == 'panel/emoji':
+            self.__settings_emoji.set_strv(name, shortcuts)
+        else:
+            self.__settings_hotkey.set_strv(name, shortcuts)
         text = "; ".join(shortcuts)
         entry.set_text(text)
         tooltip = "\n".join(shortcuts)
