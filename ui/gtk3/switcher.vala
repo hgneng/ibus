@@ -160,7 +160,7 @@ class Switcher : Gtk.Window {
         m_label.set_text(m_buttons[index].transname);
         m_buttons[index].grab_focus();
 
-        debug("[hgneng] next_engine: %s", m_buttons[m_selected_engine].longname);
+        //debug("[hgneng] next_engine: %s", m_buttons[m_selected_engine].longname);
 
         // Avoid regressions.
         if (m_popup_delay_time > 0) {
@@ -393,7 +393,7 @@ class Switcher : Gtk.Window {
         m_label.set_text(m_buttons[m_selected_engine].transname);
         set_focus(m_buttons[m_selected_engine]);
 
-        debug("[hgneng] next_engine: %s", m_buttons[m_selected_engine].longname);
+        //debug("[hgneng] next_engine: %s", m_buttons[m_selected_engine].longname);
     }
 
     private void previous_engine() {

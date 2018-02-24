@@ -289,8 +289,9 @@ public class PropertyPanel : Gtk.Box {
         m_toplevel.resize(1, 1);
     }
 
-    private int guessState = 0;
     */
+    private int guessState = 0; // hgneng
+
     private void create_menu_items() {
         int i = 0;
         while (true) {
