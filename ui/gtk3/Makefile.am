@@ -3,8 +3,8 @@
 # ibus - The Input Bus
 #
 # Copyright (c) 2007-2015 Peng Huang <shawn.p.huang@gmail.com>
-# Copyright (c) 2015-2018 Takao Fujwiara <takao.fujiwara1@gmail.com>
-# Copyright (c) 2007-2018 Red Hat, Inc.
+# Copyright (c) 2015-2019 Takao Fujwiara <takao.fujiwara1@gmail.com>
+# Copyright (c) 2007-2019 Red Hat, Inc.
 #
 # This library is free software; you can redistribute it and/or
 # modify it under the terms of the GNU Lesser General Public
@@ -84,27 +84,16 @@ AM_VALAFLAGS = \
 	--target-glib="$(VALA_TARGET_GLIB_VERSION)" \
 	$(NULL)
 
-if ENABLE_LIBNOTIFY
-AM_CFLAGS += \
-	@LIBNOTIFY_CFLAGS@ \
-	$(NULL)
-
-AM_LDADD += \
-	@LIBNOTIFY_LIBS@ \
-	$(NULL)
-
-AM_VALAFLAGS += \
-	--pkg=libnotify \
-	-D ENABLE_LIBNOTIFY \
-	$(NULL)
-endif
-
 if ENABLE_APPINDICATOR
 AM_VALAFLAGS += --define=INDICATOR
 endif
 
 if ENABLE_APPINDICATOR_ENGINE_ICON
 AM_VALAFLAGS += --define=INDICATOR_ENGINE_ICON
+endif
+
+if ENABLE_GDK3_WAYLAND
+AM_VALAFLAGS += --pkg=gdk-wayland --define=USE_GDK_WAYLAND
 endif
 
 libexec_PROGRAMS = ibus-ui-gtk3
@@ -146,6 +135,8 @@ CLEANFILES =            \
     gtkpanel.xml        \
     $(NULL)
 
+MAINTAINERCLEANFILES =
+
 emoji_headers =         \
     ibusemojidialog.h   \
     $(NULL)
@@ -166,6 +157,8 @@ EXTRA_DIST =                            \
     gtkpanel.xml.in                     \
     notification-item.xml               \
     notification-watcher.xml            \
+    ibus-ui-emojier.desktop.in          \
+    ibus-extension-gtk3.desktop.in      \
     panelbinding.vala                   \
     $(NULL)
 
@@ -179,6 +172,7 @@ ibus_ui_emojier_VALASOURCES =                   \
     emojier.vala                                \
     iconwidget.vala                             \
     separator.vala                              \
+    pango.vala                                  \
     $(NULL)
 ibus_ui_emojier_SOURCES =                       \
     $(ibus_ui_emojier_VALASOURCES:.vala=.c)     \
@@ -205,6 +199,8 @@ emojierapp.o: $(srcdir)/emojierapp.c
 	$(AM_V_CC_no)$(COMPILE) -c -o $@ $<
 	$(NULL)
 
+MAINTAINERCLEANFILES += emojierapp.c
+
 component_DATA += gtkextension.xml
 CLEANFILES += gtkextension.xml
 libexec_PROGRAMS += ibus-extension-gtk3
@@ -216,6 +212,7 @@ ibus_extension_gtk3_VALASOURCES =               \
     iconwidget.vala                             \
     keybindingmanager.vala                      \
     panelbinding.vala                           \
+    pango.vala                                  \
     $(NULL)
 ibus_extension_gtk3_SOURCES =                   \
     $(ibus_extension_gtk3_VALASOURCES:.vala=.c) \
@@ -252,6 +249,8 @@ panelbinding.o: $(srcdir)/panelbinding.c
 	$(AM_V_CC_no)$(COMPILE) -c -o $@ $<
 	$(NULL)
 
+MAINTAINERCLEANFILES += extension.c panelbinding.c
+
 man_seven_files = $(man_seven_in_files:.7.in=.7)
 man_seven_DATA =$(man_seven_files:.7=.7.gz)
 man_sevendir = $(mandir)/man7
@@ -262,7 +261,31 @@ man_sevendir = $(mandir)/man7
 %.7.gz: %.7
 	$(AM_V_GEN) gzip -c $< > $@.tmp && mv $@.tmp $@
 
+desktop_in_files = \
+    ibus-ui-emojier.desktop.in \
+    ibus-extension-gtk3.desktop.in \
+    $(NULL)
+desktop_notrans_files = $(desktop_in_files:.desktop.in=.desktop)
+desktop_DATA = \
+    org.freedesktop.IBus.Panel.Emojier.desktop \
+    org.freedesktop.IBus.Panel.Extension.Gtk3.desktop \
+    $(NULL)
+desktopdir = $(datadir)/applications
+%.desktop: %.desktop.in
+	$(AM_V_GEN) sed \
+		-e 's|@libexecdir[@]|$(libexecdir)|g' $< > $@.tmp && \
+                mv $@.tmp $@
+	$(NULL)
+org.freedesktop.IBus.Panel.Emojier.desktop: ibus-ui-emojier.desktop
+	$(AM_V_GEN) $(MSGFMT) --desktop --template $< -d $(top_srcdir)/po -o $@
+	$(NULL)
+org.freedesktop.IBus.Panel.Extension.Gtk3.desktop: ibus-extension-gtk3.desktop
+	$(AM_V_GEN) $(MSGFMT) --desktop --template $< -d $(top_srcdir)/po -o $@
+	$(NULL)
+
 CLEANFILES += \
+    $(desktop_DATA) \
+    $(desktop_notrans_files) \
     $(man_seven_DATA) \
     $(man_seven_files) \
     $(NULL)

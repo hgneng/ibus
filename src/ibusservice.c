@@ -2,7 +2,8 @@
 /* vim:set et sts=4: */
 /* ibus - The Input Bus
  * Copyright (C) 2008-2015 Peng Huang <shawn.p.huang@gmail.com>
- * Copyright (C) 2008-2015 Red Hat, Inc.
+ * Copyright (C) 2015-2019 Takao Fujiwara <takao.fujiwara1@gmail.com>
+ * Copyright (C) 2008-2019 Red Hat, Inc.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -23,7 +24,7 @@
 #include "ibusinternal.h"
 
 #define IBUS_SERVICE_GET_PRIVATE(o)  \
-   (G_TYPE_INSTANCE_GET_PRIVATE ((o), IBUS_TYPE_SERVICE, IBusServicePrivate))
+   ((IBusServicePrivate *)ibus_service_get_instance_private (o))
 
 enum {
     LAST_SIGNAL
@@ -132,6 +133,13 @@ static const GDBusInterfaceVTable ibus_service_interface_vtable = {
 };
 
 static IBusObjectClass *ibus_service_parent_class = NULL;
+static gint ibus_service_private_offset;
+
+static inline gpointer
+ibus_service_get_instance_private (IBusService *self)
+{
+    return (G_STRUCT_MEMBER_P (self, ibus_service_private_offset));
+}
 
 GType
 ibus_service_get_type (void)
@@ -143,7 +151,7 @@ ibus_service_get_type (void)
         (GBaseInitFunc)     ibus_service_base_init,
         (GBaseFinalizeFunc) ibus_service_base_fini,
         (GClassInitFunc)    ibus_service_class_init,
-        NULL,               /* class finialize */
+        NULL,               /* class finalize */
         NULL,               /* class data */
         sizeof (IBusService),
         0,
@@ -155,6 +163,9 @@ ibus_service_get_type (void)
                                        "IBusService",
                                        &type_info,
                                        0);
+        ibus_service_private_offset =
+                g_type_add_instance_private (type,
+                                             sizeof (IBusServicePrivate));
     }
 
     return type;
@@ -197,12 +208,20 @@ ibus_service_class_init (IBusServiceClass *class)
     GObjectClass *gobject_class = G_OBJECT_CLASS (class);
     IBusObjectClass *ibus_object_class = IBUS_OBJECT_CLASS (class);
 
-    ibus_service_parent_class = IBUS_OBJECT_CLASS (g_type_class_peek_parent (class));
+    ibus_service_parent_class =
+            IBUS_OBJECT_CLASS (g_type_class_peek_parent (class));
+    if (ibus_service_private_offset) {
+        g_type_class_adjust_private_offset (class,
+                                            &ibus_service_private_offset);
+    }
 
     gobject_class->constructed  = ibus_service_constructed;
-    gobject_class->set_property = (GObjectSetPropertyFunc) ibus_service_set_property;
-    gobject_class->get_property = (GObjectGetPropertyFunc) ibus_service_get_property;
-    ibus_object_class->destroy  = (IBusObjectDestroyFunc) ibus_service_destroy;
+    gobject_class->set_property =
+            (GObjectSetPropertyFunc) ibus_service_set_property;
+    gobject_class->get_property =
+            (GObjectGetPropertyFunc) ibus_service_get_property;
+    ibus_object_class->destroy  =
+            (IBusObjectDestroyFunc) ibus_service_destroy;
 
     /* virtual functions */
     class->service_method_call = ibus_service_service_method_call;
@@ -251,8 +270,6 @@ ibus_service_class_init (IBusServiceClass *class)
                         G_PARAM_STATIC_NICK |
                         G_PARAM_STATIC_BLURB)
                     );
-
-    g_type_class_add_private (class, sizeof (IBusServicePrivate));
 }
 
 static void
@@ -500,11 +517,13 @@ ibus_service_register (IBusService     *service,
                        GDBusConnection *connection,
                        GError         **error)
 {
+    GArray *array = NULL;
+    GArray *interfaces;
+    GDBusInterfaceInfo **p;
+
     g_return_val_if_fail (IBUS_IS_SERVICE (service), FALSE);
     g_return_val_if_fail (G_IS_DBUS_CONNECTION (connection), FALSE);
     g_return_val_if_fail (error == NULL || *error == NULL, FALSE);
-
-    GArray *array = NULL;
 
     if (g_hash_table_lookup (service->priv->table, connection)) {
         if (error) {
@@ -515,7 +534,9 @@ ibus_service_register (IBusService     *service,
         goto error_out;
     }
 
-    GDBusInterfaceInfo **p = (GDBusInterfaceInfo **)IBUS_SERVICE_GET_CLASS (service)->interfaces->data;
+    interfaces = IBUS_SERVICE_GET_CLASS (service)->interfaces;
+    g_assert (interfaces);
+    p = (GDBusInterfaceInfo **)interfaces->data;
     if (*p == NULL) {
         if (error) {
             *error = g_error_new (G_DBUS_ERROR, G_DBUS_ERROR_FAILED,

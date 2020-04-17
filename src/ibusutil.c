@@ -2,7 +2,7 @@
 /* vim:set et sts=4: */
 /* bus - The Input Bus
  * Copyright (C) 2008-2015 Peng Huang <shawn.p.huang@gmail.com>
- * Copyright (C) 2010-2017 Takao Fujiwara <takao.fujiwara1@gmail.com>
+ * Copyright (C) 2010-2019 Takao Fujiwara <takao.fujiwara1@gmail.com>
  * Copyright (C) 2008-2016 Red Hat, Inc.
  *
  * This library is free software; you can redistribute it and/or
@@ -45,7 +45,7 @@ _iso_codes_parse_xml_node (XMLNode          *node)
     GList *p;
     g_assert (node);
 
-    if (G_UNLIKELY (g_strcmp0 (node->name, "iso_639_entries") != 0)) {
+    if (G_UNLIKELY (g_strcmp0 (node->name, "iso_639_3_entries") != 0)) {
         return FALSE;
     }
 
@@ -53,13 +53,14 @@ _iso_codes_parse_xml_node (XMLNode          *node)
         XMLNode *sub_node = (XMLNode *)p->data;
         gchar **attributes = NULL;
         int i, j;
+        gboolean has_common_name = FALSE;
         struct {
             const gchar *key;
             gchar *value;
         } entries[] = {
-            { "iso_639_2B_code", NULL },
-            { "iso_639_2T_code", NULL },
-            { "iso_639_1_code", NULL },
+            { "id", NULL },
+            { "part1_code", NULL },
+            { "part2_code", NULL },
         };
 
         if (sub_node->attributes == NULL) {
@@ -68,14 +69,24 @@ _iso_codes_parse_xml_node (XMLNode          *node)
 
         attributes = sub_node->attributes;
         for (i = 0; attributes[i]; i += 2) {
-            if (g_strcmp0 (attributes[i], "name") == 0) {
+            if (!g_strcmp0 (attributes[i], "common_name")) {
                 for (j = 0; j < G_N_ELEMENTS (entries); j++) {
                     if (entries[j].value == NULL)
                         continue;
-                    g_hash_table_insert (__languages_dict,
-                                         (gpointer) g_strdup (entries[j].value),
-                                         (gpointer) g_strdup (attributes[i + 1]));
-                    entries[j].value = NULL;
+                    g_hash_table_replace (__languages_dict,
+                                          g_strdup (entries[j].value),
+                                          g_strdup (attributes[i + 1]));
+                }
+                has_common_name = TRUE;
+            } else if (!g_strcmp0 (attributes[i], "name")) {
+                if (has_common_name)
+                    continue;
+                for (j = 0; j < G_N_ELEMENTS (entries); j++) {
+                    if (entries[j].value == NULL)
+                        continue;
+                    g_hash_table_replace (__languages_dict,
+                                          g_strdup (entries[j].value),
+                                          g_strdup (attributes[i + 1]));
                 }
             } else {
                 for (j = 0; j < G_N_ELEMENTS (entries); j++) {
@@ -99,14 +110,14 @@ _load_lang()
     struct stat buf;
 
 #ifdef ENABLE_NLS
-    bindtextdomain ("iso_639", GLIB_LOCALE_DIR);
-    bind_textdomain_codeset ("iso_639", "UTF-8");
+    bindtextdomain ("iso_639_3", LOCALEDIR);
+    bind_textdomain_codeset ("iso_639_3", "UTF-8");
 #endif
 
     __languages_dict = g_hash_table_new_full (g_str_hash,
             g_str_equal, g_free, g_free);
     filename = g_build_filename (ISOCODES_PREFIX,
-                                 "share/xml/iso-codes/iso_639.xml",
+                                 "share/xml/iso-codes/iso_639_3.xml",
                                  NULL);
     if (g_stat (filename, &buf) != 0) {
         g_warning ("Can not get stat of file %s", filename);
@@ -125,8 +136,8 @@ _load_lang()
     ibus_xml_free (node);
 }
 
-const gchar *
-ibus_get_untranslated_language_name (const gchar *_locale)
+const static gchar *
+ibus_get_untranslated_raw_language_name (const gchar *_locale)
 {
     const gchar *retval;
     gchar *p = NULL;
@@ -148,19 +159,64 @@ ibus_get_untranslated_language_name (const gchar *_locale)
         return "Other";
 }
 
-const gchar *
+static char *
+get_first_item_in_semicolon_list (const char *list)
+{
+        char **items;
+        char  *item;
+
+        items = g_strsplit (list, "; ", 2);
+
+        item = g_strdup (items[0]);
+        g_strfreev (items);
+
+        return item;
+}
+
+static char *
+capitalize_utf8_string (const char *str)
+{
+    char first[8] = { 0 };
+
+    if (!str)
+        return NULL;
+
+    g_unichar_to_utf8 (g_unichar_totitle (g_utf8_get_char (str)), first);
+
+    return g_strconcat (first, g_utf8_offset_to_pointer (str, 1), NULL);
+}
+
+gchar *
+ibus_get_untranslated_language_name (const gchar *_locale)
+{
+    const gchar *raw = ibus_get_untranslated_raw_language_name (_locale);
+    gchar *tmp = get_first_item_in_semicolon_list (raw);
+    gchar *retval = capitalize_utf8_string (tmp);
+    g_free (tmp);
+    return retval;
+}
+
+gchar *
 ibus_get_language_name (const gchar *_locale)
 {
-    const gchar *retval = ibus_get_untranslated_language_name (_locale);
+    const gchar *raw = ibus_get_untranslated_raw_language_name (_locale);
+    const gchar *translation = NULL;
+    gchar *tmp;
+    gchar *retval;
 
 #ifdef ENABLE_NLS
-    if (g_strcmp0 (retval, "Other") == 0)
-        return dgettext (GETTEXT_PACKAGE, N_("Other"));
+    if (g_strcmp0 (raw, "Other") == 0)
+        return g_strdup (dgettext (GETTEXT_PACKAGE, N_("Other")));
     else
-        return dgettext ("iso_639", retval);
+        translation = dgettext ("iso_639_3", raw);
 #else
-    return retval;
+    translation = raw;
 #endif
+
+    tmp = get_first_item_in_semicolon_list (translation);
+    retval = capitalize_utf8_string (tmp);
+    g_free (tmp);
+    return retval;
 }
 
 void

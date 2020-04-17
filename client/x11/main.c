@@ -2,7 +2,7 @@
 /* vim:set et sts=4: */
 /* ibus
  * Copyright (C) 2007-2015 Peng Huang <shawn.p.huang@gmail.com>
- * Copyright (C) 2015-2017 Takao Fujiwara <takao.fujiwara1@gmail.com>
+ * Copyright (C) 2015-2019 Takao Fujiwara <takao.fujiwara1@gmail.com>
  * Copyright (C) 2007-2015 Red Hat, Inc.
  *
  * main.c:
@@ -196,7 +196,7 @@ _xim_preedit_callback_draw (XIMS xims, X11IC *x11ic, const gchar *preedit_string
         }
     }
 
-    for (i = 0; i < len; i++) {
+    for (i = 0; feedback && i < len; i++) {
         feedback[i] = 0;
     }
 
@@ -850,10 +850,9 @@ static void
 _bus_disconnected_cb (IBusBus  *bus,
                       gpointer  user_data)
 {
-    g_warning ("Connection closed by ibus-daemon");
-    g_object_unref (_bus);
-    _bus = NULL;
-    exit(EXIT_SUCCESS);
+    g_debug ("Connection closed by ibus-daemon\n");
+    g_clear_object (&_bus);
+    ibus_quit ();
 }
 
 static void
@@ -1114,7 +1113,7 @@ _print_usage (FILE *fp, gchar *name)
     fprintf (fp,
         "Usage:\n"
         " %s --help               Show this message\n"
-        "    --server-name= -n    Setup xim sevrer name\n"
+        "    --server-name= -n    Setup xim server name\n"
         "    --locale= -l         Setup support locales\n"
         "    --locale-append= -a  Append locales into the default support locales\n"
         "    --kill-daemon -k     Kill ibus daemon when exit\n"
@@ -1244,7 +1243,7 @@ main (int argc, char **argv)
         atexit (_atexit_cb);
 
     _xim_init_IMdkit ();
-    gtk_main();
+    ibus_main();
 
     exit (EXIT_SUCCESS);
 }

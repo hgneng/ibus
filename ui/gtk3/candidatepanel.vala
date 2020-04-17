@@ -3,7 +3,7 @@
  * ibus - The Input Bus
  *
  * Copyright(c) 2011-2015 Peng Huang <shawn.p.huang@gmail.com>
- * Copyright(c) 2015-2017 Takao Fujiwara <takao.fujiwara1@gmail.com>
+ * Copyright(c) 2015-2019 Takao Fujiwara <takao.fujiwara1@gmail.com>
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -156,6 +156,8 @@ public class CandidatePanel : Gtk.Box{
     public void set_auxiliary_text(IBus.Text? text) {
         if (text != null) {
             m_aux_label.set_text(text.get_text());
+            Pango.AttrList attrs = get_pango_attr_list_from_ibus_text(text);
+            m_aux_label.set_attributes(attrs);
             m_aux_label.show();
         } else {
             m_aux_label.set_text("");
@@ -245,16 +247,16 @@ public class CandidatePanel : Gtk.Box{
         m_preedit_label.set_size_request(20, -1);
         m_preedit_label.set_halign(Gtk.Align.START);
         m_preedit_label.set_valign(Gtk.Align.CENTER);
-        /* Use Gtk.Widget.set_margin_start() since gtk 3.12 */
-        m_preedit_label.set_padding(8, 0);
+        m_preedit_label.set_margin_start(8);
+        m_preedit_label.set_margin_end(8);
         m_preedit_label.set_no_show_all(true);
 
         m_aux_label = new Gtk.Label(null);
         m_aux_label.set_size_request(20, -1);
         m_aux_label.set_halign(Gtk.Align.START);
         m_aux_label.set_valign(Gtk.Align.CENTER);
-        /* Use Gtk.Widget.set_margin_start() since gtk 3.12 */
-        m_aux_label.set_padding(8, 0);
+        m_aux_label.set_margin_start(8);
+        m_aux_label.set_margin_end(8);
         m_aux_label.set_no_show_all(true);
 
         m_candidate_area = new CandidateArea(m_vertical_panel_system);
@@ -320,7 +322,7 @@ public class CandidatePanel : Gtk.Box{
 
     private void adjust_window_position_horizontal() {
         Gdk.Point cursor_right_bottom = {
-                m_cursor_location.x + m_cursor_location.width,
+                m_cursor_location.x,
                 m_cursor_location.y + m_cursor_location.height
         };
 

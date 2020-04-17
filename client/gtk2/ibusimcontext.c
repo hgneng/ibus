@@ -2,8 +2,8 @@
 /* vim:set et sts=4: */
 /* ibus - The Input Bus
  * Copyright (C) 2008-2013 Peng Huang <shawn.p.huang@gmail.com>
- * Copyright (C) 2015-2017 Takao Fujiwara <takao.fujiwara1@gmail.com>
- * Copyright (C) 2008-2017 Red Hat, Inc.
+ * Copyright (C) 2015-2019 Takao Fujiwara <takao.fujiwara1@gmail.com>
+ * Copyright (C) 2008-2019 Red Hat, Inc.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -61,6 +61,7 @@ struct _IBusIMContext {
     PangoAttrList   *preedit_attrs;
     gint             preedit_cursor_pos;
     gboolean         preedit_visible;
+    guint            preedit_mode;
 
     GdkRectangle     cursor_area;
     gboolean         has_focus;
@@ -71,6 +72,10 @@ struct _IBusIMContext {
     /* cancellable */
     GCancellable    *cancellable;
     GQueue          *events_queue;
+
+#if !GTK_CHECK_VERSION (3, 93, 0)
+    gboolean         use_button_press_event;
+#endif
 };
 
 struct _IBusIMContextClass {
@@ -90,6 +95,9 @@ static gboolean _use_key_snooper = ENABLE_SNOOPER;
 static guint    _key_snooper_id = 0;
 
 static gboolean _use_sync_mode = FALSE;
+
+static const gchar *_discard_password_apps  = "";
+static gboolean _use_discard_password = FALSE;
 
 static GtkIMContext *_focus_im_context = NULL;
 static IBusInputContext *_fake_context = NULL;
@@ -129,8 +137,14 @@ static void     ibus_im_context_set_surrounding
                                              gint           len,
                                              gint           cursor_index);
 
-
 /* static methods*/
+static void     _ibus_context_update_preedit_text_cb
+                                            (IBusInputContext   *ibuscontext,
+                                             IBusText           *text,
+                                             gint                cursor_pos,
+                                             gboolean            visible,
+                                             guint               mode,
+                                             IBusIMContext      *ibusimcontext);
 static void     _create_input_context       (IBusIMContext      *context);
 static gboolean _set_cursor_location_internal
                                             (IBusIMContext      *context);
@@ -157,8 +171,7 @@ static gboolean _slave_delete_surrounding_cb
                                              IBusIMContext      *context);
 static void     _request_surrounding_text   (IBusIMContext      *context);
 static void     _create_fake_input_context  (void);
-static void     _set_content_type           (IBusIMContext      *context);
-
+static gboolean _set_content_type           (IBusIMContext      *context);
 
 
 static GType                _ibus_type_im_context = 0;
@@ -288,6 +301,7 @@ ibus_im_context_commit_event (IBusIMContext *ibusimcontext,
         IBusText *text = ibus_text_new_from_unichar (ch);
         g_signal_emit (ibusimcontext, _signal_commit_id, 0, text->text);
         g_object_unref (text);
+        _request_surrounding_text (ibusimcontext);
         return TRUE;
     }
    return FALSE;
@@ -300,7 +314,6 @@ _process_key_event_done (GObject      *object,
 {
     IBusInputContext *context = (IBusInputContext *)object;
     GdkEventKey *event = (GdkEventKey *) user_data;
-
     GError *error = NULL;
     gboolean retval = ibus_input_context_process_key_event_async_finish (
             context,
@@ -349,12 +362,10 @@ _process_key_event (IBusInputContext *context,
         retval = TRUE;
     }
 
-    if (retval) {
+    if (retval)
         event->state |= IBUS_HANDLED_MASK;
-    }
-    else {
+    else
         event->state |= IBUS_IGNORED_MASK;
-    }
 
     return retval;
 }
@@ -376,14 +387,17 @@ _request_surrounding_text (IBusIMContext *context)
         g_signal_emit (context, _signal_retrieve_surrounding_id, 0,
                        &return_value);
         if (!return_value) {
-            context->caps &= ~IBUS_CAP_SURROUNDING_TEXT;
-            ibus_input_context_set_capabilities (context->ibuscontext,
-                                                 context->caps);
+            /* #2054 firefox::IMContextWrapper::GetCurrentParagraph() could
+             * fail with the first typing on firefox but it succeeds with
+             * the second typing.
+             */
+            g_warning ("%s has no capability of surrounding-text feature",
+                       g_get_prgname ());
         }
     }
 }
 
-static void
+static gboolean
 _set_content_type (IBusIMContext *context)
 {
 #if GTK_CHECK_VERSION (3, 6, 0)
@@ -396,11 +410,18 @@ _set_content_type (IBusIMContext *context)
                       "input-hints", &hints,
                       NULL);
 
+        if (_use_discard_password) {
+            if (purpose == GTK_INPUT_PURPOSE_PASSWORD ||
+                purpose == GTK_INPUT_PURPOSE_PIN) {
+                return FALSE;
+            }
+        }
         ibus_input_context_set_content_type (context->ibuscontext,
                                              purpose,
                                              hints);
     }
 #endif
+    return TRUE;
 }
 
 
@@ -542,6 +563,10 @@ daemon_name_appeared (GDBusConnection *connection,
                       const gchar     *owner,
                       gpointer         data)
 {
+    if (!g_strcmp0 (ibus_bus_get_service_name (_bus), IBUS_SERVICE_PORTAL)) {
+        _daemon_is_running = TRUE;
+        return;
+    }
     /* If ibus-daemon is running and run ssh -X localhost,
      * daemon_name_appeared() is called but ibus_get_address() == NULL
      * because the hostname and display number are different between
@@ -608,24 +633,45 @@ ibus_im_context_class_init (IBusIMContextClass *class)
     _use_key_snooper = !_get_boolean_env ("IBUS_DISABLE_SNOOPER",
                                           !(ENABLE_SNOOPER));
     _use_sync_mode = _get_boolean_env ("IBUS_ENABLE_SYNC_MODE", FALSE);
+    _use_discard_password = _get_boolean_env ("IBUS_DISCARD_PASSWORD", FALSE);
+
+#define CHECK_APP_IN_CSV_ENV_VARIABLES(retval,                          \
+                                       env_apps,                        \
+                                       fallback_apps,                   \
+                                       value_if_found)                  \
+{                                                                       \
+    const gchar * prgname = g_get_prgname ();                           \
+    gchar **p;                                                          \
+    gchar ** apps;                                                      \
+    if (g_getenv ((#env_apps))) {                                       \
+        fallback_apps = g_getenv (#env_apps);                           \
+    }                                                                   \
+    apps = g_strsplit ((fallback_apps), ",", 0);                        \
+    for (p = apps; *p != NULL; p++) {                                   \
+        if (g_regex_match_simple (*p, prgname, 0, 0)) {                 \
+            retval = (value_if_found);                                  \
+            break;                                                      \
+        }                                                               \
+    }                                                                   \
+    g_strfreev (apps);                                                  \
+}
 
     /* env IBUS_DISABLE_SNOOPER does not exist */
     if (_use_key_snooper) {
         /* disable snooper if app is in _no_snooper_apps */
-        const gchar * prgname = g_get_prgname ();
-        if (g_getenv ("IBUS_NO_SNOOPER_APPS")) {
-            _no_snooper_apps = g_getenv ("IBUS_NO_SNOOPER_APPS");
-        }
-        gchar **p;
-        gchar ** apps = g_strsplit (_no_snooper_apps, ",", 0);
-        for (p = apps; *p != NULL; p++) {
-            if (g_regex_match_simple (*p, prgname, 0, 0)) {
-                _use_key_snooper = FALSE;
-                break;
-            }
-        }
-        g_strfreev (apps);
+        CHECK_APP_IN_CSV_ENV_VARIABLES (_use_key_snooper,
+                                        IBUS_NO_SNOOPER_APPS,
+                                        _no_snooper_apps,
+                                        FALSE);
     }
+    if (!_use_discard_password) {
+        CHECK_APP_IN_CSV_ENV_VARIABLES (_use_discard_password,
+                                        IBUS_DISCARD_PASSWORD_APPS,
+                                        _discard_password_apps,
+                                        TRUE);
+    }
+
+#undef CHECK_APP_IN_CSV_ENV_VARIABLES
 
     /* init bus object */
     if (_bus == NULL) {
@@ -713,6 +759,7 @@ ibus_im_context_init (GObject *obj)
     ibusimcontext->preedit_attrs = NULL;
     ibusimcontext->preedit_cursor_pos = 0;
     ibusimcontext->preedit_visible = FALSE;
+    ibusimcontext->preedit_mode = IBUS_ENGINE_PREEDIT_CLEAR;
 
     // Init cursor area
     ibusimcontext->cursor_area.x = -1;
@@ -823,6 +870,36 @@ ibus_im_context_finalize (GObject *obj)
     G_OBJECT_CLASS(parent_class)->finalize (obj);
 }
 
+static void
+ibus_im_context_clear_preedit_text (IBusIMContext *ibusimcontext)
+{
+    gchar *preedit_string = NULL;
+    g_assert (ibusimcontext->ibuscontext);
+    if (ibusimcontext->preedit_visible &&
+        ibusimcontext->preedit_mode == IBUS_ENGINE_PREEDIT_COMMIT) {
+        preedit_string = g_strdup (ibusimcontext->preedit_string);
+    }
+
+    /* Clear the preedit_string but keep the preedit_cursor_pos and
+     * preedit_visible because a time lag could happen, firefox commit
+     * the preedit text before the preedit text is cleared and it cause
+     * a double commits of the Hangul preedit in firefox if the preedit
+     * would be located on the URL bar and click on anywhere of firefox
+     * out of the URL bar.
+     */
+    _ibus_context_update_preedit_text_cb (ibusimcontext->ibuscontext,
+                                          ibus_text_new_from_string (""),
+                                          ibusimcontext->preedit_cursor_pos,
+                                          ibusimcontext->preedit_visible,
+                                          IBUS_ENGINE_PREEDIT_CLEAR,
+                                          ibusimcontext);
+    if (preedit_string) {
+        g_signal_emit (ibusimcontext, _signal_commit_id, 0, preedit_string);
+        g_free (preedit_string);
+        _request_surrounding_text (ibusimcontext);
+    }
+}
+
 static gboolean
 ibus_im_context_filter_keypress (GtkIMContext *context,
                                  GdkEventKey  *event)
@@ -926,7 +1003,10 @@ ibus_im_context_focus_in (GtkIMContext *context)
 
     ibusimcontext->has_focus = TRUE;
     if (ibusimcontext->ibuscontext) {
-        _set_content_type (ibusimcontext);
+        if (!_set_content_type (ibusimcontext)) {
+            ibusimcontext->has_focus = FALSE;
+            return;
+        }
         ibus_input_context_focus_in (ibusimcontext->ibuscontext);
     }
 
@@ -958,12 +1038,18 @@ ibus_im_context_focus_out (GtkIMContext *context)
         return;
     }
 
-    g_object_remove_weak_pointer ((GObject *) context,
-                                  (gpointer *) &_focus_im_context);
-    _focus_im_context = NULL;
+    /* If _use_discard_password is TRUE or GtkEntry has no visibility,
+     * _focus_im_context is NULL.
+     */
+    if (_focus_im_context) {
+        g_object_remove_weak_pointer ((GObject *) context,
+                                      (gpointer *) &_focus_im_context);
+        _focus_im_context = NULL;
+    }
 
     ibusimcontext->has_focus = FALSE;
     if (ibusimcontext->ibuscontext) {
+        ibus_im_context_clear_preedit_text (ibusimcontext);
         ibus_input_context_focus_out (ibusimcontext->ibuscontext);
     }
 
@@ -983,6 +1069,13 @@ ibus_im_context_reset (GtkIMContext *context)
     IBusIMContext *ibusimcontext = IBUS_IM_CONTEXT (context);
 
     if (ibusimcontext->ibuscontext) {
+        /* Commented out ibus_im_context_clear_preedit_text().
+         * Hangul needs to receive the reset callback with button press
+         * but other IMEs should avoid to receive the reset callback
+         * by themselves.
+         * IBus uses button-press-event instead until GTK is fixed.
+         * https://gitlab.gnome.org/GNOME/gtk/issues/1534
+         */
         ibus_input_context_reset (ibusimcontext->ibuscontext);
     }
     gtk_im_context_reset (ibusimcontext->slave);
@@ -1029,21 +1122,80 @@ ibus_im_context_get_preedit_string (GtkIMContext   *context,
 }
 
 
+#if !GTK_CHECK_VERSION (3, 93, 0)
+/* Use the button-press-event signal until GtkIMContext always emits the reset
+ * signal.
+ * https://gitlab.gnome.org/GNOME/gtk/merge_requests/460
+ */
+static gboolean
+ibus_im_context_button_press_event_cb (GtkWidget      *widget,
+                                       GdkEventButton *event,
+                                       IBusIMContext  *ibusimcontext)
+{
+    if (event->button != 1)
+        return FALSE;
+
+    if (ibusimcontext->ibuscontext) {
+        ibus_im_context_clear_preedit_text (ibusimcontext);
+        ibus_input_context_reset (ibusimcontext->ibuscontext);
+    }
+    return FALSE;
+}
+
+static void
+_connect_button_press_event (IBusIMContext *ibusimcontext,
+                             gboolean       do_connect)
+{
+    GtkWidget *widget = NULL;
+
+    g_assert (ibusimcontext->client_window);
+    gdk_window_get_user_data (ibusimcontext->client_window,
+                              (gpointer *)&widget);
+    /* firefox needs GtkWidget instead of GtkWindow */
+    if (GTK_IS_WIDGET (widget)) {
+        if (do_connect) {
+            g_signal_connect (
+                    widget,
+                    "button-press-event",
+                    G_CALLBACK (ibus_im_context_button_press_event_cb),
+                    ibusimcontext);
+            ibusimcontext->use_button_press_event = TRUE;
+        } else {
+            g_signal_handlers_disconnect_by_func (
+                    widget,
+                    G_CALLBACK (ibus_im_context_button_press_event_cb),
+                    ibusimcontext);
+            ibusimcontext->use_button_press_event = FALSE;
+        }
+    }
+}
+#endif
+
 static void
 ibus_im_context_set_client_window (GtkIMContext *context, GdkWindow *client)
 {
+    IBusIMContext *ibusimcontext;
+
     IDEBUG ("%s", __FUNCTION__);
 
-    IBusIMContext *ibusimcontext = IBUS_IM_CONTEXT (context);
+    ibusimcontext = IBUS_IM_CONTEXT (context);
 
     if (ibusimcontext->client_window) {
+#if !GTK_CHECK_VERSION (3, 93, 0)
+        if (ibusimcontext->use_button_press_event)
+            _connect_button_press_event (ibusimcontext, FALSE);
+#endif
         g_object_unref (ibusimcontext->client_window);
         ibusimcontext->client_window = NULL;
     }
 
-    if (client != NULL)
+    if (client != NULL) {
         ibusimcontext->client_window = g_object_ref (client);
-
+#if !GTK_CHECK_VERSION (3, 93, 0)
+        if (!ibusimcontext->use_button_press_event)
+            _connect_button_press_event (ibusimcontext, TRUE);
+#endif
+    }
     if (ibusimcontext->slave)
         gtk_im_context_set_client_window (ibusimcontext->slave, client);
 }
@@ -1354,6 +1506,7 @@ _key_is_modifier (guint keyval)
         return FALSE;
     }
 }
+
 /* Copy from gdk */
 static GdkEventKey *
 _create_gdk_event (IBusIMContext *ibusimcontext,
@@ -1491,6 +1644,7 @@ _ibus_context_update_preedit_text_cb (IBusInputContext  *ibuscontext,
                                       IBusText          *text,
                                       gint               cursor_pos,
                                       gboolean           visible,
+                                      guint              mode,
                                       IBusIMContext     *ibusimcontext)
 {
     IDEBUG ("%s", __FUNCTION__);
@@ -1505,6 +1659,15 @@ _ibus_context_update_preedit_text_cb (IBusInputContext  *ibuscontext,
         pango_attr_list_unref (ibusimcontext->preedit_attrs);
         ibusimcontext->preedit_attrs = NULL;
     }
+
+#if !GTK_CHECK_VERSION (3, 93, 0)
+    if (!ibusimcontext->use_button_press_event &&
+        mode == IBUS_ENGINE_PREEDIT_COMMIT) {
+        if (ibusimcontext->client_window) {
+            _connect_button_press_event (ibusimcontext, TRUE);
+        }
+    }
+#endif
 
     str = text->text;
     ibusimcontext->preedit_string = g_strdup (str);
@@ -1547,6 +1710,7 @@ _ibus_context_update_preedit_text_cb (IBusInputContext  *ibuscontext,
 
     flag = ibusimcontext->preedit_visible != visible;
     ibusimcontext->preedit_visible = visible;
+    ibusimcontext->preedit_mode = mode;
 
     if (ibusimcontext->preedit_visible) {
         if (flag) {
@@ -1637,7 +1801,7 @@ _create_input_context_done (IBusBus       *bus,
         g_error_free (error);
     }
     else {
-
+        ibus_input_context_set_client_commit_preedit (context, TRUE);
         ibusimcontext->ibuscontext = context;
 
         g_signal_connect (ibusimcontext->ibuscontext,
@@ -1653,7 +1817,7 @@ _create_input_context_done (IBusBus       *bus,
                           G_CALLBACK (_ibus_context_delete_surrounding_text_cb),
                           ibusimcontext);
         g_signal_connect (ibusimcontext->ibuscontext,
-                          "update-preedit-text",
+                          "update-preedit-text-with-mode",
                           G_CALLBACK (_ibus_context_update_preedit_text_cb),
                           ibusimcontext);
         g_signal_connect (ibusimcontext->ibuscontext,

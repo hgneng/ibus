@@ -2,8 +2,8 @@
 /* vim:set et sts=4: */
 /* ibus - The Input Bus
  * Copyright (C) 2008-2013 Peng Huang <shawn.p.huang@gmail.com>
- * Copyright (C) 2018 Takao Fujiwara <takao.fujiwara1@gmail.com>
- * Copyright (C) 2008-2018 Red Hat, Inc.
+ * Copyright (C) 2018-2019 Takao Fujiwara <takao.fujiwara1@gmail.com>
+ * Copyright (C) 2008-2019 Red Hat, Inc.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -20,15 +20,19 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301
  * USA
  */
-#include "ibusengine.h"
 #include <stdarg.h>
 #include <string.h>
+
+#include "ibusaccelgroup.h"
+#include "ibusengine.h"
+#include "ibuskeysyms.h"
 #include "ibusmarshalers.h"
 #include "ibusinternal.h"
 #include "ibusshare.h"
+#include "ibusxevent.h"
 
 #define IBUS_ENGINE_GET_PRIVATE(o)  \
-   (G_TYPE_INSTANCE_GET_PRIVATE ((o), IBUS_TYPE_ENGINE, IBusEnginePrivate))
+   ((IBusEnginePrivate *)ibus_engine_get_instance_private (o))
 
 enum {
     PROCESS_KEY_EVENT,
@@ -74,11 +78,16 @@ struct _IBusEnginePrivate {
     /* cached content-type */
     guint content_purpose;
     guint content_hints;
+
+    GHashTable            *extension_keybindings;
+    gboolean               enable_extension;
+    gchar                 *current_extension_name;
 };
+
 
 static guint            engine_signals[LAST_SIGNAL] = { 0 };
 
-static IBusText *text_empty = NULL;
+static IBusText *text_empty;
 
 /* functions prototype */
 static void      ibus_engine_destroy         (IBusEngine         *engine);
@@ -178,7 +187,7 @@ static void      ibus_engine_dbus_property_changed
                                               GVariant           *value);
 
 
-G_DEFINE_TYPE (IBusEngine, ibus_engine, IBUS_TYPE_SERVICE)
+G_DEFINE_TYPE_WITH_PRIVATE (IBusEngine, ibus_engine, IBUS_TYPE_SERVICE)
 
 static const gchar introspection_xml[] =
     "<node>"
@@ -234,6 +243,12 @@ static const gchar introspection_xml[] =
     "      <arg direction='in'  type='u' name='cursor_pos' />"
     "      <arg direction='in'  type='u' name='anchor_pos' />"
     "    </method>"
+    "    <method name='PanelExtensionReceived'>"
+    "      <arg direction='in'  type='v' name='event' />"
+    "    </method>"
+    "    <method name='PanelExtensionRegisterKeys'>"
+    "      <arg direction='in'  type='v' name='data' />"
+    "    </method>"
     /* FIXME signals */
     "    <signal name='CommitText'>"
     "      <arg type='v' name='text' />"
@@ -263,10 +278,26 @@ static const gchar introspection_xml[] =
     "      <arg type='u' name='keycode' />"
     "      <arg type='u' name='state' />"
     "    </signal>"
+    "    <signal name='PanelExtension'>"
+    "      <arg type='v' name='data' />"
+    "    </signal>"
     /* FIXME properties */
     "    <property name='ContentType' type='(uu)' access='write' />"
     "  </interface>"
     "</node>";
+
+static const guint IBUS_MODIFIER_FILTER =
+        IBUS_MODIFIER_MASK & ~(
+        IBUS_LOCK_MASK |  /* Caps Lock */
+        IBUS_MOD2_MASK |  /* Num Lock */
+        IBUS_BUTTON1_MASK |
+        IBUS_BUTTON2_MASK |
+        IBUS_BUTTON3_MASK |
+        IBUS_BUTTON4_MASK |
+        IBUS_BUTTON5_MASK |
+        IBUS_SUPER_MASK |
+        IBUS_HYPER_MASK |
+        IBUS_META_MASK);
 
 static void
 ibus_engine_class_init (IBusEngineClass *class)
@@ -274,16 +305,22 @@ ibus_engine_class_init (IBusEngineClass *class)
     GObjectClass *gobject_class = G_OBJECT_CLASS (class);
     IBusObjectClass *ibus_object_class = IBUS_OBJECT_CLASS (class);
 
-    gobject_class->set_property = (GObjectSetPropertyFunc) ibus_engine_set_property;
-    gobject_class->get_property = (GObjectGetPropertyFunc) ibus_engine_get_property;
+    gobject_class->set_property =
+            (GObjectSetPropertyFunc) ibus_engine_set_property;
+    gobject_class->get_property =
+            (GObjectGetPropertyFunc) ibus_engine_get_property;
 
     ibus_object_class->destroy = (IBusObjectDestroyFunc) ibus_engine_destroy;
 
-    IBUS_SERVICE_CLASS (class)->service_method_call  = ibus_engine_service_method_call;
-    IBUS_SERVICE_CLASS (class)->service_get_property = ibus_engine_service_get_property;
-    IBUS_SERVICE_CLASS (class)->service_set_property = ibus_engine_service_set_property;
+    IBUS_SERVICE_CLASS (class)->service_method_call  =
+            ibus_engine_service_method_call;
+    IBUS_SERVICE_CLASS (class)->service_get_property =
+            ibus_engine_service_get_property;
+    IBUS_SERVICE_CLASS (class)->service_set_property =
+            ibus_engine_service_set_property;
 
-    ibus_service_class_add_interfaces (IBUS_SERVICE_CLASS (class), introspection_xml);
+    ibus_service_class_add_interfaces (IBUS_SERVICE_CLASS (class),
+                                       introspection_xml);
 
     class->process_key_event = ibus_engine_process_key_event;
     class->focus_in     = ibus_engine_focus_in;
@@ -349,7 +386,7 @@ ibus_engine_class_init (IBusEngineClass *class)
             G_SIGNAL_RUN_LAST,
             G_STRUCT_OFFSET (IBusEngineClass, process_key_event),
             g_signal_accumulator_true_handled, NULL,
-            _ibus_marshal_BOOL__UINT_UINT_UINT,
+            _ibus_marshal_BOOLEAN__UINT_UINT_UINT,
             G_TYPE_BOOLEAN,
             3,
             G_TYPE_UINT,
@@ -793,8 +830,6 @@ ibus_engine_class_init (IBusEngineClass *class)
             G_TYPE_UINT,
             G_TYPE_UINT);
 
-    g_type_class_add_private (class, sizeof (IBusEnginePrivate));
-
     text_empty = ibus_text_new_from_static_string ("");
     g_object_ref_sink (text_empty);
 }
@@ -802,21 +837,27 @@ ibus_engine_class_init (IBusEngineClass *class)
 static void
 ibus_engine_init (IBusEngine *engine)
 {
-    engine->priv = IBUS_ENGINE_GET_PRIVATE (engine);
-
-    engine->priv->surrounding_text = g_object_ref_sink (text_empty);
+    IBusEnginePrivate *priv;
+    engine->priv = priv = IBUS_ENGINE_GET_PRIVATE (engine);
+    priv->surrounding_text = g_object_ref_sink (text_empty);
+    priv->extension_keybindings = g_hash_table_new_full (
+            g_str_hash,
+            g_str_equal,
+            g_free,
+            g_free);
 }
 
 static void
 ibus_engine_destroy (IBusEngine *engine)
 {
-    g_free (engine->priv->engine_name);
-    engine->priv->engine_name = NULL;
+    IBusEnginePrivate *priv = engine->priv;
 
-    if (engine->priv->surrounding_text) {
-        g_object_unref (engine->priv->surrounding_text);
-        engine->priv->surrounding_text = NULL;
-    }
+    g_clear_pointer (&priv->engine_name, g_free);
+    g_clear_pointer (&priv->current_extension_name, g_free);
+    if (priv->surrounding_text)
+        g_clear_object (&priv->surrounding_text);
+    if (priv->extension_keybindings)
+        g_clear_pointer (&priv->extension_keybindings, g_hash_table_destroy);
 
     IBUS_OBJECT_CLASS(ibus_engine_parent_class)->destroy (IBUS_OBJECT (engine));
 }
@@ -852,6 +893,83 @@ ibus_engine_get_property (IBusEngine *engine,
     }
 }
 
+static void
+ibus_engine_panel_extension (IBusEngine  *engine,
+                             const gchar *name)
+{
+    IBusEnginePrivate *priv;
+    IBusExtensionEvent *event;
+    GVariant *data;
+
+    g_assert (IBUS_IS_ENGINE (engine));
+    g_assert (name);
+
+    priv = engine->priv;
+    if (!g_strcmp0 (name, priv->current_extension_name))
+        priv->enable_extension = !priv->enable_extension;
+    else
+        priv->enable_extension = TRUE;
+    if (priv->enable_extension) {
+        g_free (priv->current_extension_name);
+        priv->current_extension_name = g_strdup (name);
+    }
+    event = ibus_extension_event_new (
+            "name", name,
+            "is-enabled", priv->enable_extension,
+            NULL);
+    g_assert (IBUS_IS_EXTENSION_EVENT (event));
+    data = ibus_serializable_serialize_object (
+            IBUS_SERIALIZABLE (event));
+
+    g_assert (data != NULL);
+    ibus_engine_emit_signal (engine,
+                             "PanelExtension",
+                             g_variant_new ("(v)", data));
+    g_object_unref (event);
+}
+
+static gboolean
+ibus_engine_filter_key_event (IBusEngine *engine,
+                              guint       keyval,
+                              guint       keycode,
+                              guint       state)
+{
+    IBusEnginePrivate *priv;
+    GList *names, *n;
+    IBusProcessKeyEventData *keys;
+    guint modifiers;
+
+    if ((state & IBUS_RELEASE_MASK) != 0)
+        return FALSE;
+    g_return_val_if_fail (IBUS_IS_ENGINE (engine), FALSE);
+
+    priv = engine->priv;
+    modifiers = state & IBUS_MODIFIER_FILTER;
+    if (keyval >= IBUS_KEY_A && keyval <= IBUS_KEY_Z &&
+        (modifiers & IBUS_SHIFT_MASK) != 0) {
+        keyval = keyval - IBUS_KEY_A + IBUS_KEY_a;
+    }
+    names = g_hash_table_get_keys (priv->extension_keybindings);
+    if (!names)
+        return FALSE;
+    for (n = names; n; n = n->next) {
+        const gchar *name = (const gchar *)n->data;
+        keys = g_hash_table_lookup (priv->extension_keybindings, name);
+        for (; keys; keys++) {
+            if (keys->keyval == 0 && keys->keycode == 0 && keys->state == 0)
+                break;
+            if (keys->keyval == keyval &&
+                keys->state == modifiers &&
+                (keys->keycode == 0 || keys->keycode == keycode)) {
+                ibus_engine_panel_extension (engine, name);
+                return TRUE;
+            }
+        }
+    }
+    g_list_free (names);
+    return FALSE;
+}
+
 static gboolean
 ibus_engine_service_authorized_method (IBusService     *service,
                                        GDBusConnection *connection)
@@ -859,6 +977,97 @@ ibus_engine_service_authorized_method (IBusService     *service,
     if (ibus_service_get_connection (service) == connection)
         return TRUE;
     return FALSE;
+}
+
+static void
+ibus_engine_service_panel_extension_register_keys (IBusEngine      *engine,
+                                                   GVariant        *parameters,
+                                                   GDBusMethodInvocation
+                                                                   *invocation)
+{
+    IBusEnginePrivate *priv = engine->priv;
+    GVariant *v1 = NULL;
+    GVariant *v2 = NULL;
+    GVariant *v3 = NULL;
+    GVariant *vkeys = NULL;
+    GVariantIter *iter1 = NULL;
+    GVariantIter *iter2 = NULL;
+    const gchar *name = NULL;
+    guint failure_id = 0;
+
+    g_variant_get (parameters, "(v)", &v1);
+    if (v1)
+        g_variant_get (v1, "(v)", &v2);
+    else
+        failure_id = 1;
+    if (v2)
+        g_variant_get (v2, "a{sv}", &iter1);
+    else
+        failure_id = 2;
+    if (iter1) {
+        while (g_variant_iter_loop (iter1, "{&sv}", &name, &vkeys)) {
+            if (vkeys)
+                g_variant_get (vkeys, "av", &iter2);
+            if (name && iter2) {
+                IBusProcessKeyEventData *keys = NULL;
+                gint num = 0;
+                while (g_variant_iter_loop (iter2, "v", &v3)) {
+                    if (v3) {
+                        guint keyval = 0;
+                        guint keycode = 0;
+                        guint state = 0;
+                        g_variant_get (v3, "(iii)",
+                                       &keyval, &keycode, &state);
+                        if (!keys)
+                            keys = g_new0 (IBusProcessKeyEventData, 2);
+                        else
+                            keys = g_renew (IBusProcessKeyEventData,
+                                            keys,
+                                            num + 2);
+                        keys[num].keyval = keyval;
+                        keys[num].keycode = keycode;
+                        keys[num].state = state;
+                        keys[num + 1].keyval = 0;
+                        keys[num + 1].keycode = 0;
+                        keys[num + 1].state = 0;
+                        g_clear_pointer (&v3, g_variant_unref);
+                        num++;
+                    } else {
+                        failure_id = 5;
+                    }
+                }
+                if (num > 0) {
+                    g_hash_table_replace (priv->extension_keybindings,
+                                          g_strdup (name),
+                                          keys);
+                } else {
+                    g_hash_table_remove (priv->extension_keybindings, name);
+                }
+                g_clear_pointer (&iter2, g_variant_iter_free);
+            } else {
+                failure_id = 4;
+            }
+            g_clear_pointer (&vkeys, g_variant_unref);
+            name = NULL;
+        }
+        g_variant_iter_free (iter1);
+    } else {
+        failure_id = 3;
+    }
+    if (failure_id == 0) {
+        g_dbus_method_invocation_return_value (invocation, NULL);
+    } else {
+        g_dbus_method_invocation_return_error (
+                invocation,
+                G_DBUS_ERROR,
+                G_DBUS_ERROR_FAILED,
+                "PanelExtensionRegisterKeys method gives NULL: %d",
+                failure_id);
+    }
+    if (v2)
+        g_variant_unref (v2);
+    if (v1)
+        g_variant_unref (v1);
 }
 
 static void
@@ -872,6 +1081,7 @@ ibus_engine_service_method_call (IBusService           *service,
                                  GDBusMethodInvocation *invocation)
 {
     IBusEngine *engine = IBUS_ENGINE (service);
+    IBusEnginePrivate *priv = engine->priv;
 
     if (g_strcmp0 (interface_name, IBUS_INTERFACE_ENGINE) != 0) {
         IBUS_SERVICE_CLASS (ibus_engine_parent_class)->
@@ -892,6 +1102,7 @@ ibus_engine_service_method_call (IBusService           *service,
     if (g_strcmp0 (method_name, "ProcessKeyEvent") == 0) {
         guint keyval, keycode, state;
         gboolean retval = FALSE;
+
         g_variant_get (parameters, "(uuu)", &keyval, &keycode, &state);
         g_signal_emit (engine,
                        engine_signals[PROCESS_KEY_EVENT],
@@ -900,7 +1111,40 @@ ibus_engine_service_method_call (IBusService           *service,
                        keycode,
                        state,
                        &retval);
+        if (!retval) {
+            retval = ibus_engine_filter_key_event (engine,
+                                                   keyval,
+                                                   keycode,
+                                                   state);
+        }
         g_dbus_method_invocation_return_value (invocation, g_variant_new ("(b)", retval));
+        return;
+    }
+    if (g_strcmp0 (method_name, "PanelExtensionReceived") == 0) {
+        GVariant *arg0 = NULL;
+        IBusExtensionEvent *event = NULL;
+
+        g_variant_get (parameters, "(v)", &arg0);
+        if (arg0) {
+            event = (IBusExtensionEvent *)ibus_serializable_deserialize_object (
+                    arg0);
+        }
+        if (!event) {
+            g_dbus_method_invocation_return_error (
+                    invocation,
+                    G_DBUS_ERROR,
+                    G_DBUS_ERROR_FAILED,
+                    "PanelExtensionReceived method gives NULL");
+            return;
+        }
+        priv->enable_extension = ibus_extension_event_is_enabled (event);
+        g_dbus_method_invocation_return_value (invocation, NULL);
+        return;
+    }
+    if (g_strcmp0 (method_name, "PanelExtensionRegisterKeys") == 0) {
+        ibus_engine_service_panel_extension_register_keys (engine,
+                                                           parameters,
+                                                           invocation);
         return;
     }
 

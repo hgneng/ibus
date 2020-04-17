@@ -1,10 +1,10 @@
 .\" This file is distributed under the same license as the ibus
 .\" package.
-.\" Copyright (C) Takao Fujiwara <takao.fujiwara1@gmail.com>, 2017.
+.\" Copyright (C) Takao Fujiwara <takao.fujiwara1@gmail.com>, 2017-2018.
 .\"
-.TH "IBUS EMOJI" 1 "May 2017" "@VERSION@" "User Commands"
+.TH "IBUS EMOJI" 7 "August 2018" "@VERSION@" "User Commands"
 .SH NAME
-.B ibus emoji utility
+.B ibus-emoji
 \- Call the IBus emoji utility by
 .B IBus Emojier
 
@@ -77,8 +77,8 @@ If Shift\-Space is typed,
 a space chararacter can be inserted between words in an annotation or
 Unicode points. E.g. 1f466 Shift\-Space 1f3fb
 .TP
-\fBPageDown or PageUp\fR
-Move to the next or previous page in the emoji list.
+\fBPageDown, PageUp, Control-Shift-n or Control-Shift-p\fR
+Move to the next or previous page in the category or emoji list.
 .TP
 \fBHead, End, Control-h or Control-e\fR
 Select the first or last emoji on the list if an annotation is not typed.

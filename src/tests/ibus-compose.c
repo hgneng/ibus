@@ -1,33 +1,35 @@
 #include <gtk/gtk.h>
 #include "ibus.h"
 #include "ibuscomposetable.h"
+#include "ibusenginesimpleprivate.h"
+
+#define GREEN "\033[0;32m"
+#define RED   "\033[0;31m"
+#define NC    "\033[0m"
 
 IBusBus *m_bus;
-IBusComposeTable *m_compose_table;
+gchar *m_compose_file;
+IBusComposeTableEx *m_compose_table;
 IBusEngine *m_engine;
-int m_retval;
+gchar *m_srcdir;
 
 static gboolean window_focus_in_event_cb (GtkWidget     *entry,
                                           GdkEventFocus *event,
                                           gpointer       data);
 
-static IBusEngine *
-create_engine_cb (IBusFactory *factory, const gchar *name, gpointer data)
+
+static gchar *
+get_compose_path ()
 {
-    static int i = 1;
-    gchar *engine_path =
-            g_strdup_printf ("/org/freedesktop/IBus/engine/simpletest/%d",
-                             i++);
-    gchar *compose_path = NULL;
     const gchar * const *langs;
     const gchar * const *l;
+    gchar *compose_path = NULL;
 
-    m_engine = ibus_engine_new_with_type (IBUS_TYPE_ENGINE_SIMPLE,
-                                          name,
-                                          engine_path,
-                                          ibus_bus_get_connection (m_bus));
-    g_free (engine_path);
+#if GLIB_CHECK_VERSION (2, 58, 0)
+    langs = g_get_language_names_with_category ("LC_CTYPE");
+#else
     langs = g_get_language_names ();
+#endif
     for (l = langs; *l; l++) {
         if (g_str_has_prefix (*l, "en_US"))
             break;
@@ -42,18 +44,39 @@ create_engine_cb (IBusFactory *factory, const gchar *name, gpointer data)
         g_free (compose_path);
         compose_path = NULL;
     }
+
+    return compose_path;
+}
+
+
+static IBusEngine *
+create_engine_cb (IBusFactory *factory,
+                  const gchar *name,
+                  gpointer     data)
+{
+    static int i = 1;
+    gchar *engine_path =
+            g_strdup_printf ("/org/freedesktop/IBus/engine/simpletest/%d",
+                             i++);
+    gchar *compose_path;
+
+    m_engine = ibus_engine_new_with_type (IBUS_TYPE_ENGINE_SIMPLE,
+                                          name,
+                                          engine_path,
+                                          ibus_bus_get_connection (m_bus));
+    g_free (engine_path);
+    if (m_compose_file)
+        compose_path = g_build_filename (m_srcdir, m_compose_file, NULL);
+    else
+        compose_path = get_compose_path ();
     if (compose_path != NULL) {
-        m_compose_table = ibus_compose_table_new_with_file (compose_path);
+        ibus_engine_simple_add_compose_file (IBUS_ENGINE_SIMPLE (m_engine),
+                                             compose_path);
+        m_compose_table = ibus_compose_table_load_cache (compose_path);
         if (m_compose_table == NULL)
             g_warning ("Your locale uses en_US compose table.");
-        else
-            ibus_engine_simple_add_table (IBUS_ENGINE_SIMPLE (m_engine),
-                                          m_compose_table->data,
-                                          m_compose_table->max_seq_len,
-                                          m_compose_table->n_seqs);
-    } else {
-        g_warning ("Your locale uses en_US compose file.");
     }
+    g_free (compose_path);
     return m_engine;
 }
 
@@ -100,8 +123,7 @@ register_ibus_engine ()
 static gboolean
 finit (gpointer data)
 {
-    m_retval = -1;
-    g_warning ("time out");
+    g_test_incomplete ("time out");
     gtk_main_quit ();
     return FALSE;
 }
@@ -114,9 +136,12 @@ set_engine_cb (GObject *object, GAsyncResult *res, gpointer data)
     GError *error = NULL;
     int i, j;
     int index_stride;
+    IBusComposeTablePrivate *priv;
 
     if (!ibus_bus_set_global_engine_async_finish (bus, res, &error)) {
-        g_warning ("set engine failed: %s", error->message);
+        gchar *msg = g_strdup_printf ("set engine failed: %s", error->message);
+        g_test_incomplete (msg);
+        g_free (msg);
         g_error_free (error);
         return;
     }
@@ -143,6 +168,27 @@ set_engine_cb (GObject *object, GAsyncResult *res, gpointer data)
             modifiers |= IBUS_RELEASE_MASK;
             g_signal_emit_by_name (m_engine, "process-key-event",
                                    keyval, keycode, modifiers, &retval);
+        }
+    }
+    priv = m_compose_table->priv;
+    if (priv) {
+        for (i = 0;
+             i < (priv->first_n_seqs * index_stride);
+             i += index_stride) {
+            for (j = i; j < i + (index_stride - 1); j++) {
+                guint keyval = priv->data_first[j];
+                guint keycode = 0;
+                guint modifiers = 0;
+                gboolean retval;
+
+                if (keyval == 0)
+                    break;
+                g_signal_emit_by_name (m_engine, "process-key-event",
+                                       keyval, keycode, modifiers, &retval);
+                modifiers |= IBUS_RELEASE_MASK;
+                g_signal_emit_by_name (m_engine, "process-key-event",
+                                       keyval, keycode, modifiers, &retval);
+            }
         }
     }
 
@@ -172,42 +218,95 @@ window_inserted_text_cb (GtkEntryBuffer *buffer,
                          guint           nchars,
                          gpointer        data)
 {
+/* https://gitlab.gnome.org/GNOME/gtk/commit/9981f46e0b
+ * The latest GTK does not emit "inserted-text" when the text is "".
+ */
+#if !GTK_CHECK_VERSION (3, 22, 16)
     static int n_loop = 0;
+#endif
     static guint stride = 0;
+    static gboolean enable_32bit = FALSE;
     guint i;
     int seq;
     gunichar code = g_utf8_get_char (chars);
     const gchar *test;
     GtkEntry *entry = GTK_ENTRY (data);
+    IBusComposeTablePrivate *priv;
 
     g_assert (m_compose_table != NULL);
 
+    priv = m_compose_table->priv;
+
+#if !GTK_CHECK_VERSION (3, 22, 16)
     if (n_loop % 2 == 1) {
         n_loop = 0;
         return;
     }
-    i = stride + (m_compose_table->max_seq_len + 2) - 1;
-    seq = (i + 1) / (m_compose_table->max_seq_len + 2);
-    if (m_compose_table->data[i] == code) {
-        test = "OK";
+#endif
+    i = stride + (m_compose_table->max_seq_len + 2) - 2;
+    seq = (i + 2) / (m_compose_table->max_seq_len + 2);
+    if (!enable_32bit) {
+        if (m_compose_table->data[i] == code) {
+            test = GREEN "PASS" NC;
+        } else {
+            test = RED "FAIL" NC;
+            g_test_fail ();
+        }
+        g_print ("%05d/%05d %s expected: %04X typed: %04X\n",
+                 seq,
+                 m_compose_table->n_seqs,
+                 test,
+                 m_compose_table->data[i],
+                 code);
     } else {
-        test = "NG";
-        m_retval = -1;
+        const gchar *p = chars;
+        guint num = priv->data_first[i];
+        guint index = priv->data_first[i + 1];
+        guint j = 0;
+        gboolean valid_output = TRUE;
+        for (j = 0; j < num; j++) {
+            if (priv->data_second[index + j] != code) {
+                valid_output = FALSE;
+                break;
+            }
+            p = g_utf8_next_char (p);
+            code = g_utf8_get_char (p);
+        }
+        if (valid_output) {
+            test = GREEN "PASS" NC;
+        } else {
+            test = RED "FAIL" NC;
+            g_test_fail ();
+        }
+        g_print ("%05d/%05ld %s expected: %04X[%d] typed: %04X\n",
+                 seq,
+                 priv->first_n_seqs,
+                 test,
+                 valid_output ? priv->data_second[index]
+                         : priv->data_second[index + j],
+                 valid_output ? index + num : index + j,
+                 valid_output ? g_utf8_get_char (chars) : code);
     }
-    g_print ("%05d/%05d %s expected: %04X typed: %04X\n",
-             seq,
-             m_compose_table->n_seqs,
-             test,
-             m_compose_table->data[i],
-             code);
 
-    if (seq == m_compose_table->n_seqs) {
+    stride += m_compose_table->max_seq_len + 2;
+
+    if (!enable_32bit && seq == m_compose_table->n_seqs) {
+        if (priv) {
+            enable_32bit = TRUE;
+            stride = 0;
+        } else {
+            gtk_main_quit ();
+            return;
+        }
+    }
+    if (enable_32bit && seq == priv->first_n_seqs) {
         gtk_main_quit ();
         return;
     }
 
-    stride += m_compose_table->max_seq_len + 2;
+#if !GTK_CHECK_VERSION (3, 22, 16)
     n_loop++;
+#endif
     gtk_entry_set_text (entry, "");
 }
 
@@ -229,17 +328,52 @@ create_window ()
     gtk_widget_show_all (window);
 }
 
+static void
+test_compose (void)
+{
+    GLogLevelFlags flags;
+    if (!register_ibus_engine ()) {
+        g_test_fail ();
+        return;
+    }
+
+    create_window ();
+    /* FIXME:
+     * IBusIMContext opens GtkIMContextSimple as the slave and
+     * GtkIMContextSimple opens the compose table on el_GR.UTF-8, and the
+     * multiple outputs in el_GR's compose causes a warning in gtkcomposetable
+     * and the warning always causes a fatal in GTest:
+     " "GTK+ supports to output one char only: "
+     */
+    flags = g_log_set_always_fatal (G_LOG_LEVEL_CRITICAL);
+    gtk_main ();
+    g_log_set_always_fatal (flags);
+}
+
 int
 main (int argc, char *argv[])
 {
+    const gchar *test_name;
+    gchar *test_path;
+
     ibus_init ();
+    /* Avoid a warning of "AT-SPI: Could not obtain desktop path or name"
+     * with gtk_main().
+     */
+    g_setenv ("NO_AT_BRIDGE", "1", TRUE);
+    g_test_init (&argc, &argv, NULL);
     gtk_init (&argc, &argv);
 
-    if (!register_ibus_engine ())
-        return -1;
+    m_srcdir = argc > 1 ? g_strdup (argv[1]) : g_strdup (".");
+    m_compose_file = g_strdup (g_getenv ("COMPOSE_FILE"));
+#if GLIB_CHECK_VERSION (2, 58, 0)
+    test_name = g_get_language_names_with_category ("LC_CTYPE")[0];
+#else
+    test_name = g_getenv ("LANG");
+#endif
+    test_path = g_build_filename ("/ibus-compose", test_name, NULL);
+    g_test_add_func (test_path, test_compose);
+    g_free (test_path);
 
-    create_window ();
-    gtk_main ();
-
-    return m_retval;
+    return g_test_run ();
 }

@@ -3,7 +3,7 @@
 # ibus - The Input Bus
 #
 # Copyright (c) 2007-2015 Peng Huang <shawn.p.huang@gmail.com>
-# Copyright (c) 2015-2018 Takao Fujiwara <takao.fujiwara1@gmail.com>
+# Copyright (c) 2015-2019 Takao Fujiwara <takao.fujiwara1@gmail.com>
 # Copyright (c) 2007-2017 Red Hat, Inc.
 #
 # This library is free software; you can redistribute it and/or
@@ -72,6 +72,7 @@ libibus_1_0_la_LDFLAGS =            \
     $(NULL)
 
 ibus_sources =              \
+    ibusaccelgroup.c        \
     ibusattribute.c         \
     ibusattrlist.c          \
     ibusbus.c               \
@@ -122,6 +123,7 @@ ibus_enumtypes_sources =    \
     $(NULL)
 ibus_headers =              \
     ibus.h                  \
+    ibusaccelgroup.h        \
     ibusattribute.h         \
     ibusattrlist.h          \
     ibusbus.h               \
@@ -254,6 +256,10 @@ dicts/emoji-en.dict: emoji-parser
 	    echo "WARNING: Not found $(EMOJI_ANNOTATION_DIR)/en.xml" 1>&2; \
 	fi; \
 	for f in $(LANG_FILES) ; do \
+	    if test -f dicts/emoji-$$f.dict; then \
+	        echo "Already exists dicts/emoji-$$f.dict"; \
+	        continue; \
+	    fi; \
 	    if test -f \
 	    "$(EMOJI_ANNOTATION_DIR)/../annotationsDerived/$$f.xml" ; then \
 	        xml_derived_option="--xml-derived $(EMOJI_ANNOTATION_DIR)/../annotationsDerived/$$f.xml"; \
@@ -276,6 +282,9 @@ dicts/emoji-en.dict: emoji-parser
 	    fi; \
 	    echo "Generated $$plus_comment dicts/emoji-$$f.dict"; \
 	done
+
+ibusemojigen.h: dicts/emoji-en.dict
+	$(NULL)
 
 install-data-hook: $(dict_DATA)
 	@$(NORMAL_INSTALL)

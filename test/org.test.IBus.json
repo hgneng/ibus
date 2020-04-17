@@ -32,11 +32,11 @@
             "sources": [
                 {
                     "type": "git",
-                    "url": "https://github.com/alexlarsson/ibus",
-                    "branch": "ibus-portal"
+                    "url": "https://github.com/ibus/ibus.git",
+                    "branch": "master"
                 }
             ],
-            "config-opts": ["--disable-emoji-dict", "--disable-dconf"],
+            "config-opts": ["--disable-emoji-dict", "--disable-dconf", "--disable-gtk2", "--disable-libnotify", "--disable-unicode-dict", "--disable-ui"],
             "post-install": ["gtk-query-immodules-3.0 /app/lib/gtk-3.0/3.0.0/immodules/im-ibus.so > /app/lib/gtk-3.0/3.0.0/immodules.cache"]
         }
     ]

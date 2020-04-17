@@ -3,7 +3,7 @@
  * ibus - The Input Bus
  *
  * Copyright(c) 2011-2015 Peng Huang <shawn.p.huang@gmail.com>
- * Copyright(c) 2015-2017 Takao Fujiwara <takao.fujiwara1@gmail.com>
+ * Copyright(c) 2015-2019 Takao Fujiwara <takao.fujiwara1@gmail.com>
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -24,7 +24,7 @@
 extern int ibs_word_begin;
 extern int ibs_word_end;
 extern int ibs_char_limit;
-extern char* ibs_words[];
+extern char* ibs_words[65535];
 extern void ibs_speak_politely(char *text);
 extern void ibs_stop();
 
@@ -172,7 +172,7 @@ class CandidateArea : Gtk.Box {
         m_focus_candidate = focus_candidate;
         m_show_cursor = show_cursor;
 
-        assert(candidates.length < 16);
+        assert(candidates.length <= 16);
         for (int i = 0 ; i < 16 ; i++) {
             Gtk.Label label = m_candidates[i];
             bool visible = false;
@@ -278,9 +278,10 @@ class CandidateArea : Gtk.Box {
                 candidate.show();
                 m_candidates += candidate;
 
-                /* Use Gtk.Widget.set_margin_start() since gtk 3.12 */
-                label.set_padding(8, 0);
-                candidate.set_padding(8, 0);
+                label.set_margin_start (8);
+                label.set_margin_end (8);
+                candidate.set_margin_start (8);
+                candidate.set_margin_end (8);
 
                 // Make a copy of i to workaround a bug in vala.
                 // https://bugzilla.gnome.org/show_bug.cgi?id=628336

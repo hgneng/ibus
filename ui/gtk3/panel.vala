@@ -3,7 +3,7 @@
  * ibus - The Input Bus
  *
  * Copyright(c) 2011-2014 Peng Huang <shawn.p.huang@gmail.com>
- * Copyright(c) 2015-2018 Takao Fujwiara <takao.fujiwara1@gmail.com>
+ * Copyright(c) 2015-2019 Takao Fujwiara <takao.fujiwara1@gmail.com>
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -701,29 +701,6 @@ class Panel : IBus.PanelService {
         return -1;
     }
 
-    private void update_version_1_5_3() {
-#if ENABLE_LIBNOTIFY
-        if (!Notify.is_initted()) {
-            Notify.init ("ibus");
-        }
-
-        var notification = new Notify.Notification(
-                _("IBus Update"),
-                _("Super+space is now the default hotkey."),
-                "ibus");
-        notification.set_timeout(30 * 1000);
-        notification.set_category("hotkey");
-
-        try {
-            notification.show();
-        } catch (GLib.Error e){
-            warning ("Notification is failed for IBus 1.5.3: %s", e.message);
-        }
-#else
-        warning(_("Super+space is now the default hotkey."));
-#endif
-    }
-
     private void update_version_1_5_8() {
         inited_engines_order = false;
     }
@@ -731,9 +708,6 @@ class Panel : IBus.PanelService {
     private void set_version() {
         string prev_version = m_settings_general.get_string("version");
         string current_version = null;
-
-        if (compare_versions(prev_version, "1.5.3") < 0)
-            update_version_1_5_3();
 
         if (compare_versions(prev_version, "1.5.8") < 0)
             update_version_1_5_8();
@@ -1081,7 +1055,7 @@ class Panel : IBus.PanelService {
 
     private void show_setup_dialog() {
         if (m_setup_pid != 0) {
-            if (Posix.kill(m_setup_pid, Posix.SIGUSR1) == 0)
+            if (Posix.kill(m_setup_pid, Posix.Signal.USR1) == 0)
                 return;
             m_setup_pid = 0;
         }
@@ -1115,7 +1089,7 @@ class Panel : IBus.PanelService {
 
             string copyright =
                 "Copyright © 2007-2015 Peng Huang\n" +
-                "Copyright © 2015 Takao Fujiwara\n" +
+                "Copyright © 2015-2019 Takao Fujiwara\n" +
                 "Copyright © 2007-2015 Red Hat, Inc.\n";
 
             m_about_dialog.set_copyright(copyright);
@@ -1150,26 +1124,15 @@ class Panel : IBus.PanelService {
 #if EMOJI_DICT
             item = new Gtk.MenuItem.with_label(_("Emoji Choice"));
             item.activate.connect((i) => {
-                Gdk.Event event = Gtk.get_current_event();
-                if (event == null) {
-                    event = new Gdk.Event(Gdk.EventType.KEY_PRESS);
-                    event.key.time = Gdk.CURRENT_TIME;
-                    // event.get_seat() refers event.any.window
-                    event.key.window = Gdk.get_default_root_window();
-                    event.key.window.ref();
-                }
-                IBus.XEvent xevent = new IBus.XEvent(
-                        "event-type", IBus.XEventType.KEY_PRESS,
-                        "window",
-                        (event.key.window as Gdk.X11.Window).get_xid(),
-                        "time", event.key.time,
-                        "purpose", "emoji");
-                /* new GLib.Variant("(sv)", "emoji", xevent.serialize_object())
+                IBus.ExtensionEvent event = new IBus.ExtensionEvent(
+                        "name", "emoji", "is-enabled", true,
+                        "params", "category-list");
+                /* new GLib.Variant("(sv)", "emoji", event.serialize_object())
                  * will call g_variant_unref() for the child variant by vala.
                  * I have no idea not to unref the object so integrated
-                 * the purpose to IBus.XEvent above.
+                 * the purpose to IBus.ExtensionEvent above.
                  */
-                panel_extension(xevent.serialize_object());
+                panel_extension(event);
             });
             m_sys_menu.append(item);
 #endif

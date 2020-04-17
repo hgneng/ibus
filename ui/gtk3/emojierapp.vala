@@ -3,6 +3,7 @@
  * ibus - The Input Bus
  *
  * Copyright (c) 2017 Peng Wu <alexepico@gmail.com>
+ * Copyright (c) 2017-2019 Takao Fujiwara <takao.fujiwara1@gmail.com>
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -26,55 +27,83 @@ bool partial_match = false;
 int partial_match_length = -1;
 int partial_match_condition = -1;
 
-public class EmojiApplication : Application {
+public class EmojiApplication : Gtk.Application {
     private IBusEmojier? m_emojier;
-    GLib.Settings m_settings_emoji =
+    private GLib.Settings m_settings_emoji =
             new GLib.Settings("org.freedesktop.ibus.panel.emoji");
+    private ApplicationCommandLine? m_command_line = null;
 
 
     private EmojiApplication() {
-        Object(application_id: "org.freedesktop.ibus.panel.emojier",
+        Object(application_id: "org.freedesktop.IBus.Panel.Emojier",
                flags: ApplicationFlags.HANDLES_COMMAND_LINE);
         set_inactivity_timeout(100000);
     }
 
 
-    private void show_dialog(ApplicationCommandLine command_line) {
-        m_emojier = new IBusEmojier();
-        Gdk.Event event = Gtk.get_current_event();
-        // Plasma and GNOME3 desktop returns null event
-        if (event == null) {
-            event = new Gdk.Event(Gdk.EventType.KEY_PRESS);
-            event.key.time = Gdk.CURRENT_TIME;
-            // event.get_seat() refers event.any.window
-            event.key.window = Gdk.get_default_root_window();
-            event.key.window.ref();
-        }
-        string emoji = m_emojier.run("", event);
-        if (emoji == null) {
-            m_emojier = null;
-            command_line.print("%s\n", _("Canceled to choose an emoji."));
+    private void save_selected_string(string? selected_string,
+                                      bool    cancelled) {
+        if (cancelled) {
+            m_command_line.print("%s\n", _("Canceled to choose an emoji."));
             return;
         }
+        GLib.return_if_fail(selected_string != null);
         Gtk.Clipboard clipboard = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD);
-        clipboard.set_text(emoji, -1);
+        clipboard.set_text(selected_string, -1);
         clipboard.store();
 
         var emojier_favorites = m_settings_emoji.get_strv("favorites");
         bool has_favorite = false;
         foreach (unowned string favorite in emojier_favorites) {
-            if (favorite == emoji) {
+            if (favorite == selected_string) {
                 has_favorite = true;
                 break;
             }
         }
         if (!has_favorite) {
-            emojier_favorites += emoji;
+            emojier_favorites += selected_string;
             m_settings_emoji.set_strv("favorites", emojier_favorites);
         }
+        m_command_line.print("%s\n", _("Copied an emoji to your clipboard."));
+    }
 
-        m_emojier = null;
-        command_line.print("%s\n", _("Copied an emoji to your clipboard."));
+
+    private void show_dialog(ApplicationCommandLine command_line) {
+        m_command_line = command_line;
+        m_emojier.reset();
+        m_emojier.set_annotation("");
+        m_emojier.show_all();
+    }
+
+
+    public void candidate_clicked_lookup_table(uint index,
+                                               uint button,
+                                               uint state) {
+        if (m_command_line == null)
+            return;
+        if (button == IBusEmojier.BUTTON_CLOSE_BUTTON) {
+            m_emojier.hide();
+            save_selected_string(null, true);
+            m_command_line = null;
+            return;
+        }
+        if (m_emojier == null)
+            return;
+        bool show_candidate = false;
+        uint ncandidates = m_emojier.get_number_of_candidates();
+        if (ncandidates > 0 && ncandidates >= index) {
+            m_emojier.set_cursor_pos(index);
+            show_candidate = m_emojier.has_variants(index, false);
+        } else {
+            return;
+        }
+        if (show_candidate) {
+            return;
+        }
+        string emoji = m_emojier.get_current_candidate();
+        m_emojier.hide();
+        save_selected_string(emoji, false);
+        m_command_line = null;
     }
 
 
@@ -85,7 +114,7 @@ public class EmojiApplication : Application {
     }
 
 
-    private int _command_line (ApplicationCommandLine command_line) {
+    private int _command_line(ApplicationCommandLine command_line) {
         // Set default font size
         IBusEmojier.set_emoji_font(m_settings_emoji.get_string("font"));
 
@@ -178,13 +207,37 @@ public class EmojiApplication : Application {
 
         IBusEmojier.load_unicode_dict();
 
+        if (m_emojier == null) {
+            m_emojier = new IBusEmojier();
+            // For title handling in gnome-shell
+            add_window(m_emojier);
+            m_emojier.candidate_clicked.connect((i, b, s) => {
+                candidate_clicked_lookup_table(i, b, s);
+            });
+            m_emojier.cancel.connect(() => {
+                if (m_command_line == null)
+                    return;
+                m_emojier.hide();
+                save_selected_string(null, true);
+                m_command_line = null;
+            });
+            m_emojier.commit_text.connect(() => {
+                if (m_command_line == null)
+                    return;
+                m_emojier.hide();
+                string selected_string = m_emojier.get_selected_string();
+                save_selected_string(selected_string, false);
+                m_command_line = null;
+            });
+        }
+
         activate_dialog(command_line);
 
         return Posix.EXIT_SUCCESS;
     }
 
 
-    public override int command_line (ApplicationCommandLine command_line) {
+    public override int command_line(ApplicationCommandLine command_line) {
         // keep the application running until we are done with this commandline
         this.hold();
         int result = _command_line(command_line);
@@ -193,9 +246,15 @@ public class EmojiApplication : Application {
     }
 
 
+    public override void shutdown() {
+        base.shutdown();
+        remove_window(m_emojier);
+        m_emojier = null;
+    }
+
+
     public static int main (string[] args) {
-        GLib.Intl.bindtextdomain(Config.GETTEXT_PACKAGE,
-                                 Config.GLIB_LOCALE_DIR);
+        GLib.Intl.bindtextdomain(Config.GETTEXT_PACKAGE, Config.LOCALEDIR);
         GLib.Intl.bind_textdomain_codeset(Config.GETTEXT_PACKAGE, "UTF-8");
         GLib.Intl.textdomain(Config.GETTEXT_PACKAGE);
 

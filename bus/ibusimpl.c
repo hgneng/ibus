@@ -2,8 +2,8 @@
 /* vim:set et sts=4: */
 /* ibus - The Input Bus
  * Copyright (C) 2008-2013 Peng Huang <shawn.p.huang@gmail.com>
- * Copyright (C) 2011-2018 Takao Fujiwara <takao.fujiwara1@gmail.com>
- * Copyright (C) 2008-2018 Red Hat, Inc.
+ * Copyright (C) 2011-2019 Takao Fujiwara <takao.fujiwara1@gmail.com>
+ * Copyright (C) 2008-2019 Red Hat, Inc.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -74,7 +74,8 @@ struct _BusIBusImpl {
 
     BusInputContext *focused_context;
     BusPanelProxy   *panel;
-    BusPanelProxy   *extension;
+    BusPanelProxy   *emoji_extension;
+    gboolean         enable_emoji_extension;
 
     /* a default keymap of ibus-daemon (usually "us") which is used only
      * when use_sys_layout is FALSE. */
@@ -83,6 +84,7 @@ struct _BusIBusImpl {
     gboolean use_global_engine;
     gchar *global_engine_name;
     gchar *global_previous_engine_name;
+    GVariant *extension_register_keys;
 };
 
 struct _BusIBusImplClass {
@@ -294,33 +296,138 @@ _panel_destroy_cb (BusPanelProxy *panel,
 
     if (ibus->panel == panel)
         ibus->panel = NULL;
-    else if (ibus->extension == panel)
-        ibus->extension = NULL;
+    else if (ibus->emoji_extension == panel)
+        ibus->emoji_extension = NULL;
     else
         g_return_if_reached ();
     g_object_unref (panel);
 }
 
 static void
-_panel_panel_extension_cb (BusPanelProxy *panel,
-                           GVariant      *parameters,
-                           BusIBusImpl  *ibus)
+bus_ibus_impl_set_panel_extension_mode (BusIBusImpl        *ibus,
+                                        IBusExtensionEvent *event)
 {
-    if (!ibus->extension) {
+    gboolean is_extension = FALSE;
+    g_return_if_fail (BUS_IS_IBUS_IMPL (ibus));
+    g_return_if_fail (IBUS_IS_EXTENSION_EVENT (event));
+
+    if (!ibus->emoji_extension) {
         g_warning ("Panel extension is not running.");
         return;
     }
 
-    g_return_if_fail (BUS_IS_IBUS_IMPL (ibus));
-    g_return_if_fail (BUS_IS_PANEL_PROXY (ibus->extension));
+    g_return_if_fail (BUS_IS_PANEL_PROXY (ibus->emoji_extension));
+
+    ibus->enable_emoji_extension = ibus_extension_event_is_enabled (event);
+    is_extension = ibus_extension_event_is_extension (event);
+    if (ibus->focused_context != NULL) {
+        if (ibus->enable_emoji_extension) {
+            bus_input_context_set_emoji_extension (ibus->focused_context,
+                                                   ibus->emoji_extension);
+        } else {
+            bus_input_context_set_emoji_extension (ibus->focused_context, NULL);
+        }
+        if (is_extension)
+            bus_input_context_panel_extension_received (ibus->focused_context,
+                                                        event);
+    }
+    if (is_extension)
+        return;
 
     /* Use the DBus method because it seems any DBus signal,
      * g_dbus_message_new_signal(), cannot be reached to the server. */
-    g_dbus_proxy_call (G_DBUS_PROXY (ibus->extension),
-                       "PanelExtensionReceived",
-                       parameters,
-                       G_DBUS_CALL_FLAGS_NONE,
-                       -1, NULL, NULL, NULL);
+    bus_panel_proxy_panel_extension_received (ibus->emoji_extension,
+                                              event);
+}
+
+static void
+bus_ibus_impl_set_panel_extension_keys (BusIBusImpl *ibus,
+                                        GVariant    *parameters)
+{
+    BusEngineProxy *engine = NULL;
+
+    g_return_if_fail (BUS_IS_IBUS_IMPL (ibus));
+    g_return_if_fail (parameters);
+
+    if (!ibus->emoji_extension) {
+        g_warning ("Panel extension is not running.");
+        return;
+    }
+
+    if (ibus->extension_register_keys)
+        g_variant_unref (ibus->extension_register_keys);
+    ibus->extension_register_keys = g_variant_ref_sink (parameters);
+    if (ibus->focused_context != NULL) {
+            engine = bus_input_context_get_engine (ibus->focused_context);
+    }
+    if (!engine)
+        return;
+    bus_engine_proxy_panel_extension_register_keys (engine, parameters);
+}
+
+static void
+_panel_panel_extension_cb (BusPanelProxy      *panel,
+                           IBusExtensionEvent *event,
+                           BusIBusImpl        *ibus)
+{
+    bus_ibus_impl_set_panel_extension_mode (ibus, event);
+}
+
+static void
+_panel_panel_extension_register_keys_cb (BusInputContext *context,
+                                         GVariant        *parameters,
+                                         BusIBusImpl     *ibus)
+{
+    bus_ibus_impl_set_panel_extension_keys (ibus, parameters);
+}
+
+static void
+_panel_update_preedit_text_received_cb (BusPanelProxy *panel,
+                                        IBusText      *text,
+                                        guint          cursor_pos,
+                                        gboolean       visible,
+                                        BusIBusImpl   *ibus)
+{
+    g_return_if_fail (BUS_IS_IBUS_IMPL (ibus));
+
+    if (!ibus->focused_context)
+        return;
+    bus_input_context_update_preedit_text (ibus->focused_context,
+        text, cursor_pos, visible, IBUS_ENGINE_PREEDIT_CLEAR, FALSE);
+}
+
+static void
+_panel_update_lookup_table_received_cb (BusPanelProxy   *panel,
+                                        IBusLookupTable *table,
+                                        gboolean         visible,
+                                        BusIBusImpl     *ibus)
+{
+    g_return_if_fail (BUS_IS_IBUS_IMPL (ibus));
+    g_return_if_fail (IBUS_IS_LOOKUP_TABLE (table));
+
+    if (!ibus->focused_context)
+        return;
+    /* Call bus_input_context_update_lookup_table() instead of
+     * bus_panel_proxy_update_lookup_table() for panel extensions because
+     * bus_input_context_page_up() can call bus_panel_proxy_page_up_received().
+     */
+    bus_input_context_update_lookup_table (
+            ibus->focused_context, table, visible, TRUE);
+}
+
+static void
+_panel_update_auxiliary_text_received_cb (BusPanelProxy *panel,
+                                          IBusText      *text,
+                                          gboolean       visible,
+                                          BusIBusImpl   *ibus)
+{
+    g_return_if_fail (BUS_IS_IBUS_IMPL (ibus));
+    g_return_if_fail (IBUS_IS_TEXT (text));
+
+    if (!ibus->panel)
+        return;
+    bus_panel_proxy_update_auxiliary_text (
+            ibus->panel, text, visible);
 }
 
 static void
@@ -354,8 +461,8 @@ _dbus_name_owner_changed_cb (BusDBusImpl   *dbus,
 
     if (!g_strcmp0 (name, IBUS_SERVICE_PANEL))
         panel_type = PANEL_TYPE_PANEL;
-    else if (!g_strcmp0 (name, IBUS_SERVICE_PANEL_EXTENSION))
-        panel_type = PANEL_TYPE_EXTENSION;
+    else if (!g_strcmp0 (name, IBUS_SERVICE_PANEL_EXTENSION_EMOJI))
+        panel_type = PANEL_TYPE_EXTENSION_EMOJI;
 
     if (panel_type != PANEL_TYPE_NONE) {
         if (g_strcmp0 (new_name, "") != 0) {
@@ -363,7 +470,7 @@ _dbus_name_owner_changed_cb (BusDBusImpl   *dbus,
             BusConnection *connection;
             BusInputContext *context = NULL;
             BusPanelProxy   **panel = (panel_type == PANEL_TYPE_PANEL) ?
-                                       &ibus->panel : &ibus->extension;
+                                      &ibus->panel : &ibus->emoji_extension;
 
             if (*panel != NULL) {
                 ibus_proxy_destroy ((IBusProxy *)(*panel));
@@ -376,6 +483,8 @@ _dbus_name_owner_changed_cb (BusDBusImpl   *dbus,
             g_return_if_fail (connection != NULL);
 
             *panel = bus_panel_proxy_new (connection, panel_type);
+            if (panel_type == PANEL_TYPE_EXTENSION_EMOJI)
+                ibus->enable_emoji_extension = FALSE;
 
             g_signal_connect (*panel,
                               "destroy",
@@ -385,6 +494,26 @@ _dbus_name_owner_changed_cb (BusDBusImpl   *dbus,
                               "panel-extension",
                               G_CALLBACK (_panel_panel_extension_cb),
                               ibus);
+            g_signal_connect (*panel,
+                              "panel-extension-register-keys",
+                              G_CALLBACK (
+                                      _panel_panel_extension_register_keys_cb),
+                              ibus);
+            g_signal_connect (
+                    *panel,
+                    "update-preedit-text-received",
+                    G_CALLBACK (_panel_update_preedit_text_received_cb),
+                    ibus);
+            g_signal_connect (
+                    *panel,
+                    "update-lookup-table-received",
+                    G_CALLBACK (_panel_update_lookup_table_received_cb),
+                    ibus);
+            g_signal_connect (
+                    *panel,
+                    "update-auxiliary-text-received",
+                    G_CALLBACK (_panel_update_auxiliary_text_received_cb),
+                    ibus);
 
             if (ibus->focused_context != NULL) {
                 context = ibus->focused_context;
@@ -443,7 +572,7 @@ bus_ibus_impl_init (BusIBusImpl *ibus)
     ibus->contexts = NULL;
     ibus->focused_context = NULL;
     ibus->panel = NULL;
-    ibus->extension = NULL;
+    ibus->emoji_extension = NULL;
 
     ibus->keymap = ibus_keymap_get ("us");
 
@@ -642,6 +771,21 @@ bus_ibus_impl_set_context_engine_from_desc (BusIBusImpl     *ibus,
                                           NULL);
 }
 
+static void
+_context_panel_extension_cb (BusInputContext    *context,
+                             IBusExtensionEvent *event,
+                             BusIBusImpl        *ibus)
+{
+    bus_ibus_impl_set_panel_extension_mode (ibus, event);
+}
+
+const static struct {
+    const gchar *name;
+    GCallback    callback;
+} context_signals [] = {
+    { "panel-extension",             G_CALLBACK (_context_panel_extension_cb) }
+};
+
 /**
  * bus_ibus_impl_set_focused_context:
  *
@@ -651,6 +795,11 @@ static void
 bus_ibus_impl_set_focused_context (BusIBusImpl     *ibus,
                                    BusInputContext *context)
 {
+    gint i;
+    BusEngineProxy *engine = NULL;
+    guint purpose = 0;
+    guint hints = 0;
+
     g_assert (BUS_IS_IBUS_IMPL (ibus));
     g_assert (context == NULL || BUS_IS_INPUT_CONTEXT (context));
     g_assert (context == NULL || bus_input_context_get_capabilities (context) & IBUS_CAP_FOCUS);
@@ -660,27 +809,43 @@ bus_ibus_impl_set_focused_context (BusIBusImpl     *ibus,
         return;
     }
 
-    BusEngineProxy *engine = NULL;
-    guint purpose = 0;
-    guint hints = 0;
-
     if (ibus->focused_context) {
         if (ibus->use_global_engine) {
             /* dettach engine from the focused context */
             engine = bus_input_context_get_engine (ibus->focused_context);
             if (engine) {
                 g_object_ref (engine);
+                /* _ic_focus_in() can be called before _ic_focus_out() is
+                 * called under the async processes of two ibus clients.
+                 * E.g. gedit is a little slower v.s. a simple GtkTextView
+                 * application is the fastest when you click a Hangul
+                 * preedit text between the applications.
+                 * preedit will be committed with focus-out in the ibus client
+                 * likes ibus-im.so
+                 * so do not commit preedit here in focus-in event.
+                 */
+                bus_input_context_clear_preedit_text (ibus->focused_context,
+                                                      FALSE);
                 bus_input_context_set_engine (ibus->focused_context, NULL);
+                bus_input_context_set_emoji_extension (ibus->focused_context,
+                                                       NULL);
             }
         }
 
         if (ibus->panel != NULL)
             bus_panel_proxy_focus_out (ibus->panel, ibus->focused_context);
-        if (ibus->extension != NULL)
-            bus_panel_proxy_focus_out (ibus->extension, ibus->focused_context);
+        if (ibus->emoji_extension != NULL) {
+            bus_panel_proxy_focus_out (ibus->emoji_extension,
+                                       ibus->focused_context);
+        }
+        bus_input_context_set_emoji_extension (ibus->focused_context, NULL);
 
         bus_input_context_get_content_type (ibus->focused_context,
                                             &purpose, &hints);
+        for (i = 0; i < G_N_ELEMENTS(context_signals); i++) {
+            g_signal_handlers_disconnect_by_func (ibus->focused_context,
+                    context_signals[i].callback, ibus);
+        }
         g_object_unref (ibus->focused_context);
         ibus->focused_context = NULL;
     }
@@ -697,12 +862,24 @@ bus_ibus_impl_set_focused_context (BusIBusImpl     *ibus,
         if (engine != NULL) {
             bus_input_context_set_engine (context, engine);
             bus_input_context_enable (context);
+            if (ibus->enable_emoji_extension) {
+                bus_input_context_set_emoji_extension (context,
+                                                       ibus->emoji_extension);
+            } else {
+                bus_input_context_set_emoji_extension (context, NULL);
+            }
+        }
+        for (i = 0; i < G_N_ELEMENTS(context_signals); i++) {
+            g_signal_connect (ibus->focused_context,
+                              context_signals[i].name,
+                              context_signals[i].callback,
+                              ibus);
         }
 
         if (ibus->panel != NULL)
             bus_panel_proxy_focus_in (ibus->panel, context);
-        if (ibus->extension != NULL)
-            bus_panel_proxy_focus_in (ibus->extension, context);
+        if (ibus->emoji_extension != NULL)
+            bus_panel_proxy_focus_in (ibus->emoji_extension, context);
     }
 
     if (engine != NULL)
@@ -718,6 +895,12 @@ bus_ibus_impl_set_global_engine (BusIBusImpl    *ibus,
 
     if (ibus->focused_context) {
         bus_input_context_set_engine (ibus->focused_context, engine);
+        if (ibus->enable_emoji_extension) {
+            bus_input_context_set_emoji_extension (ibus->focused_context,
+                                                   ibus->emoji_extension);
+        } else {
+            bus_input_context_set_emoji_extension (ibus->focused_context, NULL);
+        }
     } else if (ibus->fake_context) {
         bus_input_context_set_engine (ibus->fake_context, engine);
     }
@@ -894,9 +1077,9 @@ _context_destroy_cb (BusInputContext    *context,
         bus_input_context_get_capabilities (context) & IBUS_CAP_FOCUS) {
         bus_panel_proxy_destroy_context (ibus->panel, context);
     }
-    if (ibus->extension &&
+    if (ibus->emoji_extension &&
         bus_input_context_get_capabilities (context) & IBUS_CAP_FOCUS) {
-        bus_panel_proxy_destroy_context (ibus->extension, context);
+        bus_panel_proxy_destroy_context (ibus->emoji_extension, context);
     }
 
     ibus->contexts = g_list_remove (ibus->contexts, context);
@@ -1456,6 +1639,7 @@ _ibus_set_global_engine_ready_cb (BusInputContext       *context,
     else {
         g_dbus_method_invocation_return_value (data->invocation, NULL);
 
+        BusEngineProxy *engine = bus_input_context_get_engine (context);
         if (ibus->use_global_engine && (context != ibus->focused_context)) {
             /* context and ibus->focused_context don't match. This means that
              * the focus is moved before _ibus_set_global_engine() asynchronous
@@ -1463,13 +1647,27 @@ _ibus_set_global_engine_ready_cb (BusInputContext       *context,
              * being focused hasn't been updated. Update the engine here so that
              * subsequent _ibus_get_global_engine() call could return a
              * consistent engine name. */
-            BusEngineProxy *engine = bus_input_context_get_engine (context);
             if (engine && ibus->focused_context != NULL) {
                 g_object_ref (engine);
                 bus_input_context_set_engine (context, NULL);
+                bus_input_context_set_emoji_extension (context, NULL);
                 bus_input_context_set_engine (ibus->focused_context, engine);
+                if (ibus->enable_emoji_extension) {
+                    bus_input_context_set_emoji_extension (
+                            ibus->focused_context,
+                            ibus->emoji_extension);
+                } else {
+                    bus_input_context_set_emoji_extension (
+                            ibus->focused_context,
+                            NULL);
+                }
                 g_object_unref (engine);
             }
+        }
+        if (engine && ibus->extension_register_keys) {
+            bus_engine_proxy_panel_extension_register_keys (
+                    engine,
+                    ibus->extension_register_keys);
         }
     }
 
@@ -1980,11 +2178,14 @@ bus_ibus_impl_registry_destroy (BusIBusImpl *ibus)
     g_list_free_full (ibus->components, g_object_unref);
     ibus->components = NULL;
 
-    g_hash_table_destroy (ibus->engine_table);
-    ibus->engine_table = NULL;
+    g_clear_pointer (&ibus->engine_table, g_hash_table_destroy);
 
+    /* g_clear_pointer() does not set the cast. */
     ibus_object_destroy (IBUS_OBJECT (ibus->registry));
     ibus->registry = NULL;
+
+    if (ibus->extension_register_keys)
+        g_clear_pointer (&ibus->extension_register_keys, g_variant_unref);
 }
 
 static gint

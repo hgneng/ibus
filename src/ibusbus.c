@@ -2,7 +2,7 @@
 /* vim:set et sts=4: */
 /* ibus - The Input Bus
  * Copyright (C) 2008-2015 Peng Huang <shawn.p.huang@gmail.com>
- * Copyright (C) 2015-2016 Takao Fujiwara <takao.fujiwara1@gmail.com>
+ * Copyright (C) 2015-2019 Takao Fujiwara <takao.fujiwara1@gmail.com>
  * Copyright (C) 2008-2016 Red Hat, Inc.
  *
  * This library is free software; you can redistribute it and/or
@@ -22,6 +22,7 @@
  */
 
 #include "ibusbus.h"
+#include <errno.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -35,7 +36,7 @@
 #include "ibusconfig.h"
 
 #define IBUS_BUS_GET_PRIVATE(o)  \
-   (G_TYPE_INSTANCE_GET_PRIVATE ((o), IBUS_TYPE_BUS, IBusBusPrivate))
+   ((IBusBusPrivate *)ibus_bus_get_instance_private (o))
 
 enum {
     CONNECTED,
@@ -114,7 +115,7 @@ static void      ibus_bus_get_property           (IBusBus                *bus,
 
 static void     ibus_bus_close_connection        (IBusBus                *bus);
 
-G_DEFINE_TYPE (IBusBus, ibus_bus, IBUS_TYPE_OBJECT)
+G_DEFINE_TYPE_WITH_PRIVATE (IBusBus, ibus_bus, IBUS_TYPE_OBJECT)
 
 static void
 ibus_bus_class_init (IBusBusClass *class)
@@ -233,8 +234,6 @@ ibus_bus_class_init (IBusBusClass *class)
             G_TYPE_NONE,
             3,
             G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING);
-
-    g_type_class_add_private (class, sizeof (IBusBusPrivate));
 }
 
 static void
@@ -557,13 +556,17 @@ ibus_bus_init (IBusBus *bus)
     path = g_path_get_dirname (ibus_get_socket_path ());
 
     g_mkdir_with_parents (path, 0700);
-    g_chmod (path, 0700);
 
     if (stat (path, &buf) == 0) {
         if (buf.st_uid != getuid ()) {
             g_warning ("The owner of %s is not %s!",
                        path, ibus_get_user_name ());
             return;
+        }
+        if (buf.st_mode != (S_IFDIR | S_IRWXU)) {
+            errno = 0;
+            if (g_chmod (path, 0700))
+                g_warning ("chmod failed: %s", errno ? g_strerror (errno) : "");
         }
     }
 
@@ -671,7 +674,7 @@ ibus_bus_constructor (GType                  type,
             ibus_bus_connect (_bus);
     }
     else {
-        object = g_object_ref (_bus);
+        object = g_object_ref (G_OBJECT (_bus));
     }
 
     return object;
@@ -924,7 +927,7 @@ _create_input_context_async_step_one_done (GDBusConnection *connection,
 
     if (g_dbus_connection_is_closed (connection)) {
         /*
-         * The connection is closed, can not contine next steps, so complete
+         * The connection is closed, can not continue next steps, so complete
          * the asynchronous request with error.
          */
         g_variant_unref(variant);
@@ -965,7 +968,7 @@ ibus_bus_create_input_context_async (IBusBus            *bus,
     task = g_task_new (bus, cancellable, callback, user_data);
     g_task_set_source_tag (task, ibus_bus_create_input_context_async);
 
-    /* do not use ibus_bus_call_async, instread use g_dbus_connection_call
+    /* do not use ibus_bus_call_async, instead use g_dbus_connection_call
      * directly, because we need two async steps for create an IBusInputContext.
      * 1. Call CreateInputContext to request ibus-daemon create a remote IC.
      * 2. New local IBusInputContext proxy of the remote IC

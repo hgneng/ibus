@@ -73,6 +73,7 @@ struct _BusInputContext {
     guint     preedit_cursor_pos;
     gboolean  preedit_visible;
     guint     preedit_mode;
+    gboolean  client_commit_preedit;
 
     /* auxiliary text */
     IBusText *auxiliary_text;
@@ -94,6 +95,9 @@ struct _BusInputContext {
     /* content-type (primary purpose and hints) */
     guint    purpose;
     guint    hints;
+
+    BusPanelProxy *emoji_extension;
+    gboolean is_extension_lookup_table;
 };
 
 struct _BusInputContextClass {
@@ -127,6 +131,7 @@ enum {
     ENGINE_CHANGED,
     REQUEST_ENGINE,
     SET_CONTENT_TYPE,
+    PANEL_EXTENSION,
     LAST_SIGNAL,
 };
 
@@ -161,16 +166,12 @@ static gboolean bus_input_context_service_set_property
                                     GError               **error);
 static void     bus_input_context_unset_engine
                                    (BusInputContext       *context);
-static void     bus_input_context_update_preedit_text
-                                   (BusInputContext       *context,
-                                    IBusText              *text,
-                                    guint                  cursor_pos,
-                                    gboolean               visible,
-                                    guint                  mode);
 static void     bus_input_context_show_preedit_text
-                                   (BusInputContext       *context);
+                                   (BusInputContext       *context,
+                                    gboolean               is_extension);
 static void     bus_input_context_hide_preedit_text
-                                   (BusInputContext       *context);
+                                   (BusInputContext       *context,
+                                    gboolean               is_extension);
 static void     bus_input_context_update_auxiliary_text
                                    (BusInputContext       *context,
                                     IBusText              *text,
@@ -179,10 +180,6 @@ static void     bus_input_context_show_auxiliary_text
                                    (BusInputContext       *context);
 static void     bus_input_context_hide_auxiliary_text
                                    (BusInputContext       *context);
-static void     bus_input_context_update_lookup_table
-                                   (BusInputContext       *context,
-                                    IBusLookupTable       *table,
-                                    gboolean               visible);
 static void     bus_input_context_show_lookup_table
                                    (BusInputContext       *context);
 static void     bus_input_context_hide_lookup_table
@@ -216,6 +213,9 @@ static IBusPropList    *props_empty = NULL;
 static const gchar introspection_xml[] =
     "<node>"
     "  <interface name='org.freedesktop.IBus.InputContext'>"
+    /* properties */
+    "    <property name='ContentType' type='(uu)' access='write' />"
+    "    <property name='ClientCommitPreedit' type='(b)' access='write' />\n"
     /* methods */
     "    <method name='ProcessKeyEvent'>"
     "      <arg direction='in'  type='u' name='keyval' />"
@@ -277,6 +277,12 @@ static const gchar introspection_xml[] =
     "      <arg type='u' name='cursor_pos' />"
     "      <arg type='b' name='visible' />"
     "    </signal>"
+    "    <signal name='UpdatePreeditTextWithMode'>"
+    "      <arg type='v' name='text' />"
+    "      <arg type='u' name='cursor_pos' />"
+    "      <arg type='b' name='visible' />"
+    "      <arg type='u' name='mode' />"
+    "    </signal>"
     "    <signal name='ShowPreeditText'/>"
     "    <signal name='HidePreeditText'/>"
     "    <signal name='UpdateAuxiliaryText'>"
@@ -301,9 +307,6 @@ static const gchar introspection_xml[] =
     "    <signal name='UpdateProperty'>"
     "      <arg type='v' name='prop' />"
     "    </signal>"
-
-    /* properties */
-    "    <property name='ContentType' type='(uu)' access='write' />"
     "  </interface>"
     "</node>";
 
@@ -357,7 +360,7 @@ bus_input_context_class_init (BusInputContextClass *class)
             G_SIGNAL_RUN_LAST,
             0,
             NULL, NULL,
-            bus_marshal_BOOL__UINT_UINT_UINT,
+            bus_marshal_BOOLEAN__UINT_UINT_UINT,
             G_TYPE_BOOLEAN,
             3,
             G_TYPE_UINT,
@@ -598,6 +601,17 @@ bus_input_context_class_init (BusInputContextClass *class)
             G_TYPE_UINT,
             G_TYPE_UINT);
 
+    context_signals[PANEL_EXTENSION] =
+        g_signal_new (I_("panel-extension"),
+            G_TYPE_FROM_CLASS (class),
+            G_SIGNAL_RUN_LAST,
+            0,
+            NULL, NULL,
+            bus_marshal_VOID__OBJECT,
+            G_TYPE_NONE,
+            1,
+            IBUS_TYPE_EXTENSION_EVENT);
+
     text_empty = ibus_text_new_from_string ("");
     g_object_ref_sink (text_empty);
     lookup_table_empty = ibus_lookup_table_new (9 /* page size */, 0, FALSE, FALSE);
@@ -704,7 +718,9 @@ bus_input_context_emit_signal (BusInputContext *context,
                                GError         **error)
 {
     if (context->connection == NULL) {
-        g_variant_unref (parameters);
+        /* fake context has no connections. */
+        if (parameters)
+            g_variant_unref (parameters);
         return TRUE;
     }
 
@@ -746,15 +762,17 @@ bus_input_context_property_changed (BusInputContext *context,
                                           error);
 }
 
+
 /**
- * _ic_process_key_event_reply_cb:
+ * _panel_process_key_event_cb:
  *
- * A GAsyncReadyCallback function to be called when bus_engine_proxy_process_key_event() is finished.
+ * A GAsyncReadyCallback function to be called when
+ * bus_panel_proxy_process_key_event() is finished.
  */
 static void
-_ic_process_key_event_reply_cb (GObject               *source,
-                                GAsyncResult          *res,
-                                GDBusMethodInvocation *invocation)
+_panel_process_key_event_cb (GObject               *source,
+                             GAsyncResult          *res,
+                             GDBusMethodInvocation *invocation)
 {
     GError *error = NULL;
     GVariant *value = g_dbus_proxy_call_finish ((GDBusProxy *)source,
@@ -768,6 +786,61 @@ _ic_process_key_event_reply_cb (GObject               *source,
         g_dbus_method_invocation_return_gerror (invocation, error);
         g_error_free (error);
     }
+}
+
+typedef struct _ProcessKeyEventData ProcessKeyEventData;
+struct _ProcessKeyEventData {
+    GDBusMethodInvocation *invocation;
+    BusInputContext       *context;
+    guint keyval;
+    guint keycode;
+    guint modifiers;
+};
+
+/**
+ * _ic_process_key_event_reply_cb:
+ *
+ * A GAsyncReadyCallback function to be called when
+ * bus_engine_proxy_process_key_event() is finished.
+ */
+static void
+_ic_process_key_event_reply_cb (GObject               *source,
+                                GAsyncResult          *res,
+                                ProcessKeyEventData   *data)
+{
+    GDBusMethodInvocation *invocation = data->invocation;
+    BusInputContext *context = data->context;
+    guint keyval = data->keyval;
+    guint keycode = data->keycode;
+    guint modifiers = data->modifiers;
+    GError *error = NULL;
+    GVariant *value = g_dbus_proxy_call_finish ((GDBusProxy *)source,
+                                                 res,
+                                                 &error);
+
+    if (value != NULL) {
+        gboolean retval = FALSE;
+        g_variant_get (value, "(b)", &retval);
+        if (context->emoji_extension && !retval) {
+            bus_panel_proxy_process_key_event (context->emoji_extension,
+                                               keyval,
+                                               keycode,
+                                               modifiers,
+                                               (GAsyncReadyCallback)
+                                                    _panel_process_key_event_cb,
+                                               invocation);
+        } else {
+            g_dbus_method_invocation_return_value (invocation, value);
+        }
+        g_variant_unref (value);
+    }
+    else {
+        g_dbus_method_invocation_return_gerror (invocation, error);
+        g_error_free (error);
+    }
+
+    g_object_unref (context);
+    g_slice_free (ProcessKeyEventData, data);
 }
 
 /**
@@ -826,12 +899,19 @@ _ic_process_key_event  (BusInputContext       *context,
 
     /* ignore key events, if it is a fake input context */
     if (context->has_focus && context->engine && context->fake == FALSE) {
+        ProcessKeyEventData *data = g_slice_new0 (ProcessKeyEventData);
+        data->invocation = invocation;
+        data->context = g_object_ref (context);
+        data->keyval = keyval;
+        data->keycode = keycode;
+        data->modifiers = modifiers;
         bus_engine_proxy_process_key_event (context->engine,
                                             keyval,
                                             keycode,
                                             modifiers,
-                                            (GAsyncReadyCallback) _ic_process_key_event_reply_cb,
-                                            invocation);
+                                            (GAsyncReadyCallback)
+                                                _ic_process_key_event_reply_cb,
+                                            data);
     }
     else {
         g_dbus_method_invocation_return_value (invocation, g_variant_new ("(b)", FALSE));
@@ -866,6 +946,13 @@ _ic_set_cursor_location (BusInputContext       *context,
                        context->y,
                        context->w,
                        context->h);
+        if (context->emoji_extension) {
+            bus_panel_proxy_set_cursor_location (context->emoji_extension,
+                                                 context->x,
+                                                 context->y,
+                                                 context->w,
+                                                 context->h);
+        }
     }
 }
 
@@ -898,6 +985,14 @@ _ic_set_cursor_location_relative (BusInputContext       *context,
                        y,
                        w,
                        h);
+        if (context->emoji_extension) {
+            bus_panel_proxy_set_cursor_location_relative (
+                    context->emoji_extension,
+                    x,
+                    y,
+                    w,
+                    h);
+        }
     }
 }
 
@@ -981,6 +1076,12 @@ _ic_reset (BusInputContext       *context,
            GDBusMethodInvocation *invocation)
 {
     if (context->engine) {
+        if (context->preedit_mode == IBUS_ENGINE_PREEDIT_COMMIT) {
+            if (context->client_commit_preedit)
+               bus_input_context_clear_preedit_text (context, FALSE);
+            else
+               bus_input_context_clear_preedit_text (context, TRUE);
+        }
         bus_engine_proxy_reset (context->engine);
     }
     g_dbus_method_invocation_return_value (invocation, NULL);
@@ -1266,6 +1367,13 @@ _ic_set_content_type (BusInputContext *context,
     }
 }
 
+static void
+_ic_set_client_commit_preedit (BusInputContext *context,
+                               GVariant        *value)
+{
+    g_variant_get (value, "(b)", &context->client_commit_preedit);
+}
+
 static gboolean
 bus_input_context_service_set_property (IBusService     *service,
                                         GDBusConnection *connection,
@@ -1291,9 +1399,14 @@ bus_input_context_service_set_property (IBusService     *service,
     if (!bus_input_context_service_authorized_method (service, connection))
         return FALSE;
 
+    g_return_val_if_fail (BUS_IS_INPUT_CONTEXT (service), FALSE);
+
     if (g_strcmp0 (property_name, "ContentType") == 0) {
-        BusInputContext *context = (BusInputContext *) service;
-        _ic_set_content_type (context, value);
+        _ic_set_content_type (BUS_INPUT_CONTEXT (service), value);
+        return TRUE;
+    }
+    if (g_strcmp0 (property_name, "ClientCommitPreedit") == 0) {
+        _ic_set_client_commit_preedit (BUS_INPUT_CONTEXT (service), value);
         return TRUE;
     }
 
@@ -1365,22 +1478,44 @@ bus_input_context_focus_in (BusInputContext *context)
 
 /**
  * bus_input_context_clear_preedit_text:
+ * @context: A #BusInputContext
+ * @with_signal: %FALSE if the preedit is already updated in ibus clients
+ *               likes ibus-im.so. Otherwise %TRUE.
  *
- * Clear context->preedit_text. If the preedit mode is IBUS_ENGINE_PREEDIT_COMMIT, commit it before clearing.
+ * Clear context->preedit_text. If the preedit mode is
+ * IBUS_ENGINE_PREEDIT_COMMIT, commit it before clearing.
  */
-static void
-bus_input_context_clear_preedit_text (BusInputContext *context)
+void
+bus_input_context_clear_preedit_text (BusInputContext *context,
+                                      gboolean         with_signal)
 {
+    IBusText *preedit_text;
+    guint     preedit_mode;
+    gboolean  preedit_visible;
+
     g_assert (BUS_IS_INPUT_CONTEXT (context));
 
-    if (context->preedit_visible &&
-        context->preedit_mode == IBUS_ENGINE_PREEDIT_COMMIT) {
-        bus_input_context_commit_text (context, context->preedit_text);
+    if (!with_signal) {
+        g_object_unref (context->preedit_text);
+        context->preedit_mode = IBUS_ENGINE_PREEDIT_CLEAR;
+        context->preedit_text = (IBusText *) g_object_ref_sink (text_empty);
+        context->preedit_cursor_pos = 0;
+        context->preedit_visible = FALSE;
+        return;
     }
 
-    /* always clear preedit text */
+    /* always clear preedit text to reset the cursor position in the
+     * client application before commit the preeit text. */
+    preedit_text = g_object_ref (context->preedit_text);
+    preedit_mode = context->preedit_mode;
+    preedit_visible = context->preedit_visible;
     bus_input_context_update_preedit_text (context,
-        text_empty, 0, FALSE, IBUS_ENGINE_PREEDIT_CLEAR);
+        text_empty, 0, FALSE, IBUS_ENGINE_PREEDIT_CLEAR, TRUE);
+
+    if (preedit_visible && preedit_mode == IBUS_ENGINE_PREEDIT_COMMIT) {
+        bus_input_context_commit_text (context, preedit_text);
+    }
+    g_object_unref (preedit_text);
 }
 
 void
@@ -1391,9 +1526,15 @@ bus_input_context_focus_out (BusInputContext *context)
     if (!context->has_focus)
         return;
 
-    bus_input_context_clear_preedit_text (context);
+    if (context->client_commit_preedit)
+        bus_input_context_clear_preedit_text (context, FALSE);
+    else
+        bus_input_context_clear_preedit_text (context, TRUE);
     bus_input_context_update_auxiliary_text (context, text_empty, FALSE);
-    bus_input_context_update_lookup_table (context, lookup_table_empty, FALSE);
+    bus_input_context_update_lookup_table (context,
+                                           lookup_table_empty,
+                                           FALSE,
+                                           FALSE);
     bus_input_context_register_properties (context, props_empty);
 
     if (context->engine) {
@@ -1413,7 +1554,12 @@ bus_input_context_focus_out (BusInputContext *context)
     {                                                                       \
         g_assert (BUS_IS_INPUT_CONTEXT (context));                          \
                                                                             \
-        if (context->has_focus && context->engine) {    \
+        if (context->is_extension_lookup_table &&                           \
+            context->emoji_extension) {                                     \
+            bus_panel_proxy_##name##_lookup_table (context->emoji_extension); \
+            return;                                                         \
+        }                                                                   \
+        if (context->has_focus && context->engine) {                        \
             bus_engine_proxy_##name (context->engine);                      \
         }                                                                   \
     }
@@ -1433,6 +1579,14 @@ bus_input_context_candidate_clicked (BusInputContext *context,
 {
     g_assert (BUS_IS_INPUT_CONTEXT (context));
 
+    if (context->is_extension_lookup_table && context->emoji_extension) {
+        bus_panel_proxy_candidate_clicked_lookup_table (
+                context->emoji_extension,
+                index,
+                button,
+                state);
+            return;
+    }
     if (context->engine) {
         bus_engine_proxy_candidate_clicked (context->engine,
                                             index,
@@ -1454,60 +1608,32 @@ bus_input_context_property_activate (BusInputContext *context,
 }
 
 /**
- * bus_input_context_update_preedit_text:
- *
- * Update a preedit text. Send D-Bus signal to update status of client or send glib signal to the panel, depending on capabilities of the client.
- */
-static void
-bus_input_context_update_preedit_text (BusInputContext *context,
-                                       IBusText        *text,
-                                       guint            cursor_pos,
-                                       gboolean         visible,
-                                       guint            mode)
-{
-    g_assert (BUS_IS_INPUT_CONTEXT (context));
-
-    if (context->preedit_text) {
-        g_object_unref (context->preedit_text);
-    }
-
-    context->preedit_text = (IBusText *) g_object_ref_sink (text ? text : text_empty);
-    context->preedit_cursor_pos = cursor_pos;
-    context->preedit_visible = visible;
-    context->preedit_mode = mode;
-
-    if (PREEDIT_CONDITION) {
-        GVariant *variant = ibus_serializable_serialize ((IBusSerializable *)context->preedit_text);
-        bus_input_context_emit_signal (context,
-                                       "UpdatePreeditText",
-                                       g_variant_new ("(vub)", variant, context->preedit_cursor_pos, context->preedit_visible),
-                                       NULL);
-    }
-    else {
-        g_signal_emit (context,
-                       context_signals[UPDATE_PREEDIT_TEXT],
-                       0,
-                       context->preedit_text,
-                       context->preedit_cursor_pos,
-                       context->preedit_visible);
-    }
-}
-
-/**
  * bus_input_context_show_preedit_text:
  *
  * Show a preedit text. Send D-Bus signal to update status of client or send glib signal to the panel, depending on capabilities of the client.
  */
 static void
-bus_input_context_show_preedit_text (BusInputContext *context)
+bus_input_context_show_preedit_text (BusInputContext *context,
+                                     gboolean         is_extension)
 {
     g_assert (BUS_IS_INPUT_CONTEXT (context));
 
-    if (context->preedit_visible) {
+    if (context->preedit_visible)
+        return;
+    if (!is_extension && context->emoji_extension)
+        return;
+
+    if (!is_extension)
+        context->preedit_visible = TRUE;
+
+    if (context->emoji_extension && !is_extension) {
+        /* Do not use HIDE_PREEDIT_TEXT signal below but call
+         * bus_panel_proxy_hide_preedit_text() directly for the extension only
+         * but not for the normal panel.
+         */
+        bus_panel_proxy_show_preedit_text (context->emoji_extension);
         return;
     }
-
-    context->preedit_visible = TRUE;
 
     if (PREEDIT_CONDITION) {
         bus_input_context_emit_signal (context,
@@ -1528,15 +1654,25 @@ bus_input_context_show_preedit_text (BusInputContext *context)
  * Hide a preedit text. Send D-Bus signal to update status of client or send glib signal to the panel, depending on capabilities of the client.
  */
 static void
-bus_input_context_hide_preedit_text (BusInputContext *context)
+bus_input_context_hide_preedit_text (BusInputContext *context,
+                                     gboolean         is_extension)
 {
     g_assert (BUS_IS_INPUT_CONTEXT (context));
 
-    if (!context->preedit_visible) {
+    if (!is_extension && !context->preedit_visible)
+        return;
+
+    if (!is_extension)
+        context->preedit_visible = FALSE;
+
+    if (context->emoji_extension && !is_extension) {
+        /* Do not use HIDE_PREEDIT_TEXT signal below but call
+         * bus_panel_proxy_hide_preedit_text() directly for the extension only
+         * but not for the normal panel.
+         */
+        bus_panel_proxy_hide_preedit_text (context->emoji_extension);
         return;
     }
-
-    context->preedit_visible = FALSE;
 
     if (PREEDIT_CONDITION) {
         bus_input_context_emit_signal (context,
@@ -1646,17 +1782,22 @@ bus_input_context_hide_auxiliary_text (BusInputContext *context)
 
 /**
  * bus_input_context_update_lookup_table:
- *
- * Update contents in the lookup table.
- * Send D-Bus signal to update status of client or send glib signal to the panel, depending on capabilities of the client.
+ * @context: #BusInputContext
+ * @table: #IBusLookupTable
+ * @visible: %TRUE if the lookup table is visible, otherwise %FALSE.
+ * @is_extension: %TRUE if the lookup table is called by a panel extension.
+ *                %FALSE if it's called by an engine.
+ * I.e. is_extension_lookup_table means the owner of the lookup table.
  */
-static void
+void
 bus_input_context_update_lookup_table (BusInputContext *context,
                                        IBusLookupTable *table,
-                                       gboolean         visible)
+                                       gboolean         visible,
+                                       gboolean         is_extension)
 {
     g_assert (BUS_IS_INPUT_CONTEXT (context));
 
+    context->is_extension_lookup_table = is_extension;
     if (context->lookup_table) {
         g_object_unref (context->lookup_table);
     }
@@ -2021,7 +2162,9 @@ _engine_update_preedit_text_cb (BusEngineProxy  *engine,
 
     g_assert (context->engine == engine);
 
-    bus_input_context_update_preedit_text (context, text, cursor_pos, visible, mode);
+    bus_input_context_update_preedit_text (context, text,
+                                           cursor_pos, visible, mode,
+                                           TRUE);
 }
 
 /**
@@ -2061,7 +2204,7 @@ _engine_update_lookup_table_cb (BusEngineProxy   *engine,
 
     g_assert (context->engine == engine);
 
-    bus_input_context_update_lookup_table (context, table, visible);
+    bus_input_context_update_lookup_table (context, table, visible, FALSE);
 }
 
 /**
@@ -2102,6 +2245,44 @@ _engine_update_property_cb (BusEngineProxy  *engine,
     bus_input_context_update_property (context, prop);
 }
 
+/**
+ * _engine_panel_extension_cb:
+ *
+ * A function to be called when "panel-extension" glib signal is sent
+ * from the engine object.
+ */
+static void
+_engine_panel_extension_cb (BusEngineProxy     *engine,
+                            IBusExtensionEvent *event,
+                            BusInputContext    *context)
+{
+    g_signal_emit (context, context_signals[PANEL_EXTENSION], 0, event);
+}
+
+static void
+_engine_show_preedit_text_cb (BusEngineProxy  *engine,
+                              BusInputContext *context)
+{
+    g_assert (BUS_IS_ENGINE_PROXY (engine));
+    g_assert (BUS_IS_INPUT_CONTEXT (context));
+
+    g_assert (context->engine == engine);
+
+    bus_input_context_show_preedit_text (context, FALSE);
+}
+
+static void
+_engine_hide_preedit_text_cb (BusEngineProxy  *engine,
+                              BusInputContext *context)
+{
+    g_assert (BUS_IS_ENGINE_PROXY (engine));
+    g_assert (BUS_IS_INPUT_CONTEXT (context));
+
+    g_assert (context->engine == engine);
+
+    bus_input_context_hide_preedit_text (context, FALSE);
+}
+
 #define DEFINE_FUNCTION(name)                                   \
     static void                                                 \
     _engine_##name##_cb (BusEngineProxy   *engine,              \
@@ -2115,8 +2296,6 @@ _engine_update_property_cb (BusEngineProxy  *engine,
         bus_input_context_##name (context);                     \
     }
 
-DEFINE_FUNCTION (show_preedit_text)
-DEFINE_FUNCTION (hide_preedit_text)
 DEFINE_FUNCTION (show_auxiliary_text)
 DEFINE_FUNCTION (hide_auxiliary_text)
 DEFINE_FUNCTION (show_lookup_table)
@@ -2209,9 +2388,12 @@ bus_input_context_disable (BusInputContext *context)
 {
     g_assert (BUS_IS_INPUT_CONTEXT (context));
 
-    bus_input_context_clear_preedit_text (context);
+    bus_input_context_clear_preedit_text (context, TRUE);
     bus_input_context_update_auxiliary_text (context, text_empty, FALSE);
-    bus_input_context_update_lookup_table (context, lookup_table_empty, FALSE);
+    bus_input_context_update_lookup_table (context,
+                                           lookup_table_empty,
+                                           FALSE,
+                                           FALSE);
     bus_input_context_register_properties (context, props_empty);
 
     if (context->engine) {
@@ -2244,7 +2426,8 @@ const static struct {
     { "cursor-down-lookup-table", G_CALLBACK (_engine_cursor_down_lookup_table_cb) },
     { "register-properties",      G_CALLBACK (_engine_register_properties_cb) },
     { "update-property",          G_CALLBACK (_engine_update_property_cb) },
-    { "destroy",                  G_CALLBACK (_engine_destroy_cb) },
+    { "panel-extension",          G_CALLBACK (_engine_panel_extension_cb) },
+    { "destroy",                  G_CALLBACK (_engine_destroy_cb) }
 };
 
 static void
@@ -2252,9 +2435,12 @@ bus_input_context_unset_engine (BusInputContext *context)
 {
     g_assert (BUS_IS_INPUT_CONTEXT (context));
 
-    bus_input_context_clear_preedit_text (context);
+    bus_input_context_clear_preedit_text (context, TRUE);
     bus_input_context_update_auxiliary_text (context, text_empty, FALSE);
-    bus_input_context_update_lookup_table (context, lookup_table_empty, FALSE);
+    bus_input_context_update_lookup_table (context,
+                                           lookup_table_empty,
+                                           FALSE,
+                                           FALSE);
     bus_input_context_register_properties (context, props_empty);
 
     if (context->engine) {
@@ -2357,7 +2543,7 @@ new_engine_cb (GObject             *obj,
     }
     else {
         if (data->context->data != data) {
-            /* Request has been overriden or cancelled */
+            /* Request has been overridden or cancelled */
             g_object_unref (engine);
             g_task_return_new_error (data->task,
                                      G_IO_ERROR,
@@ -2610,17 +2796,140 @@ bus_input_context_set_content_type (BusInputContext *context,
 }
 
 void
-bus_input_context_commit_text (BusInputContext *context,
-                               IBusText        *text)
+bus_input_context_commit_text_use_extension (BusInputContext *context,
+                                             IBusText        *text,
+                                             gboolean         use_extension)
 {
     g_assert (BUS_IS_INPUT_CONTEXT (context));
 
     if (text == text_empty || text == NULL)
         return;
 
-    GVariant *variant = ibus_serializable_serialize ((IBusSerializable *)text);
-    bus_input_context_emit_signal (context,
-                                   "CommitText",
-                                   g_variant_new ("(v)", variant),
-                                   NULL);
+    if (use_extension && context->emoji_extension) {
+        bus_panel_proxy_commit_text_received (context->emoji_extension, text);
+    } else {
+        GVariant *variant = ibus_serializable_serialize (
+                (IBusSerializable *)text);
+        bus_input_context_emit_signal (context,
+                                       "CommitText",
+                                       g_variant_new ("(v)", variant),
+                                       NULL);
+    }
+}
+
+void
+bus_input_context_commit_text (BusInputContext *context,
+                               IBusText        *text)
+{
+    bus_input_context_commit_text_use_extension (context, text, TRUE);
+}
+
+void
+bus_input_context_update_preedit_text (BusInputContext *context,
+                                       IBusText        *text,
+                                       guint            cursor_pos,
+                                       gboolean         visible,
+                                       guint            mode,
+                                       gboolean         use_extension)
+{
+    gboolean extension_visible = FALSE;
+    g_assert (BUS_IS_INPUT_CONTEXT (context));
+
+    if (context->preedit_text) {
+        g_object_unref (context->preedit_text);
+    }
+
+    context->preedit_text = (IBusText *) g_object_ref_sink (text ? text :
+                                                            text_empty);
+    context->preedit_cursor_pos = cursor_pos;
+    if (use_extension)
+        context->preedit_visible = visible;
+    if (use_extension)
+        context->preedit_mode = mode;
+    extension_visible = context->preedit_visible |
+                        (context->emoji_extension != NULL);
+
+    if (use_extension && context->emoji_extension) {
+        bus_panel_proxy_update_preedit_text (context->emoji_extension,
+                                             context->preedit_text,
+                                             context->preedit_cursor_pos,
+                                             context->preedit_visible);
+    } else if (PREEDIT_CONDITION) {
+        GVariant *variant = ibus_serializable_serialize (
+                (IBusSerializable *)context->preedit_text);
+        if (context->client_commit_preedit) {
+            bus_input_context_emit_signal (
+                    context,
+                    "UpdatePreeditTextWithMode",
+                    g_variant_new ("(vubu)",
+                                   variant,
+                                   context->preedit_cursor_pos,
+                                   extension_visible,
+                                   context->preedit_mode),
+                    NULL);
+        } else {
+            bus_input_context_emit_signal (
+                    context,
+                    "UpdatePreeditText",
+                    g_variant_new ("(vub)",
+                                   variant,
+                                   context->preedit_cursor_pos,
+                                   extension_visible),
+                    NULL);
+        }
+    } else {
+        g_signal_emit (context,
+                       context_signals[UPDATE_PREEDIT_TEXT],
+                       0,
+                       context->preedit_text,
+                       context->preedit_cursor_pos,
+                       extension_visible);
+    }
+}
+
+void
+bus_input_context_set_emoji_extension (BusInputContext *context,
+                                       BusPanelProxy   *emoji_extension)
+{
+    g_assert (BUS_IS_INPUT_CONTEXT (context));
+
+    if (context->emoji_extension)
+        g_object_unref (context->emoji_extension);
+    context->emoji_extension = emoji_extension;
+    if (emoji_extension) {
+        g_object_ref (context->emoji_extension);
+        if (!context->connection)
+            return;
+        bus_input_context_show_preedit_text (context, TRUE);
+        bus_panel_proxy_set_cursor_location (context->emoji_extension,
+                                             context->x,
+                                             context->y,
+                                             context->w,
+                                             context->h);
+    } else {
+        if (!context->connection)
+            return;
+        /* https://gitlab.gnome.org/GNOME/gnome-shell/merge_requests/113
+         * Cannot use bus_input_context_hide_preedit_text () yet.
+         */
+        if (!context->preedit_visible) {
+            bus_input_context_update_preedit_text (context,
+                                                   text_empty,
+                                                   0,
+                                                   FALSE,
+                                                   IBUS_ENGINE_PREEDIT_CLEAR,
+                                                   FALSE);
+        }
+    }
+}
+
+void
+bus_input_context_panel_extension_received (BusInputContext    *context,
+                                            IBusExtensionEvent *event)
+{
+    g_assert (BUS_IS_INPUT_CONTEXT (context));
+
+    if (!context->engine)
+        return;
+    bus_engine_proxy_panel_extension_received (context->engine, event);
 }

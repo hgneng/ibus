@@ -13,11 +13,11 @@ sudo ln -s /usr/share/unicode /usr/share/unicode/ucd
 
 make
 
-ps -ef | grep 'ibus-ui-gtk3' | grep -v grep | awk '{print $2}' | xargs kill
+#ps -ef | grep 'ibus-ui-gtk3' | grep -v grep | awk '{print $2}' | xargs kill
 
 sudo make install
 
-sudo ln -sf /usr/lib/libibus-1.0.so.5 /usr/lib/x86_64-linux-gnu/libibus-1.0.so.5
+#sudo ln -sf /usr/lib/libibus-1.0.so.5 /usr/lib/x86_64-linux-gnu/libibus-1.0.so.5
 
 #ui/gtk3/ibus-ui-gtk3&
 #sleep 3
@@ -26,5 +26,6 @@ sudo ln -sf /usr/lib/libibus-1.0.so.5 /usr/lib/x86_64-linux-gnu/libibus-1.0.so.5
 im-config -n ibus
 gsettings set org.gnome.desktop.input-sources sources "[('xkb', 'us'), ('ibus', 'pinyin')]"
 ibus-daemon -drx
+# for debug: bus/ibus-daemon -rxv
 ibus restart
 ibus engine pinyin

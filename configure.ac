@@ -3,8 +3,8 @@
 # ibus - The Input Bus
 #
 # Copyright (c) 2007-2016 Peng Huang <shawn.p.huang@gmail.com>
-# Copyright (c) 2015-2018 Takao Fujiwara <takao.fujiwara1@gmail.com>
-# Copyright (c) 2007-2018 Red Hat, Inc.
+# Copyright (c) 2015-2020 Takao Fujiwara <takao.fujiwara1@gmail.com>
+# Copyright (c) 2007-2020 Red Hat, Inc.
 #
 # This library is free software; you can redistribute it and/or
 # modify it under the terms of the GNU Lesser General Public
@@ -27,7 +27,7 @@ m4_define([ibus_released], [1])
 
 m4_define([ibus_major_version], [1])
 m4_define([ibus_minor_version], [5])
-m4_define([ibus_micro_version], [17])
+m4_define([ibus_micro_version], [22])
 m4_define([ibus_abi_current], [5])
 m4_define([ibus_abi_revision],
           [m4_eval(100 * ibus_minor_version + ibus_micro_version)])
@@ -52,12 +52,13 @@ m4_define([ibus_binary_version],
           [ibus_major_version.ibus_abi_current_minus_age.ibus_abi_age.ibus_abi_revision])
 
 # Required versions of other packages.
-m4_define([glib_required_version], [2.36.0])
+m4_define([glib_required_version], [2.46.0])
+m4_define([gtk3_required_version], [3.12.0])
 
 # VALA_TARGET_GLIB_VERSION is used by valac --ccode --target-glib .
 # VALA_TARGET_GLIB_VERSION and glib_required_version will be different
 # in the future.
-VALA_TARGET_GLIB_VERSION=2.36
+VALA_TARGET_GLIB_VERSION=2.46
 AC_SUBST(VALA_TARGET_GLIB_VERSION)
 
 # Init automake.
@@ -111,9 +112,9 @@ GETTEXT_PACKAGE=ibus10
 AC_SUBST(GETTEXT_PACKAGE)
 AC_DEFINE_UNQUOTED(GETTEXT_PACKAGE, "$GETTEXT_PACKAGE",
                    [The prefix for out gettext translation domains.])
-GLIB_DEFINE_LOCALEDIR(GLIB_LOCALE_DIR)
-GLIB_LOCALE_DIR=$localedir
-AC_SUBST(GLIB_LOCALE_DIR)
+DEFINE_IBUS_LOCALEDIR
+AC_DEFINE_UNQUOTED(LOCALEDIR, "$ibus_localedir",
+                   [Define the location where the catalogs will be installed])
 
 # For dislpay date.
 m4_define(ibus_datedisplay,
@@ -131,14 +132,17 @@ AC_PROG_INSTALL
 AC_PROG_MAKE_SET
 
 # i18n stuff
-AM_GLIB_GNU_GETTEXT
+AM_GNU_GETTEXT_VERSION([0.19.8])
+AM_GNU_GETTEXT([external])
 
 # Define PACKAGE_VERSION_* variables.
 AM_DISABLE_STATIC
 AC_ISC_POSIX
 AC_HEADER_STDC
 LT_INIT
-IT_PROG_INTLTOOL([0.35.0])
+
+# Check header filess.
+AC_CHECK_HEADERS([sys/prctl.h])
 
 # Check functions.
 AC_CHECK_FUNCS(daemon)
@@ -235,14 +239,23 @@ fi
 if test x"$enable_gtk3" = x"yes"; then
     # check for gtk3
     PKG_CHECK_MODULES(GTK3, [
-        gtk+-3.0
+        gtk+-3.0 >= gtk3_required_version
     ])
+    PKG_CHECK_EXISTS([gdk-wayland-3.0],
+        [enable_gdk3_wayland=yes],
+        [enable_gdk3_wayland=no]
+    )
 
     gtk3_binary_version=`$PKG_CONFIG --variable=gtk_binary_version gtk+-3.0`
     GTK3_IM_MODULEDIR="$libdir"/gtk-3.0/$gtk3_binary_version/immodules
 else
     enable_gtk3="no (disabled, use --enable-gtk3 to enable)"
+    enable_gdk3_wayland=no
 fi
+if test x"$enable_gdk3_wayland" != x"yes"; then
+    enable_gdk3_wayland="no (disabled, need to install gdk-wayland-3.0.pc)"
+fi
+AM_CONDITIONAL([ENABLE_GDK3_WAYLAND], [test x"$enable_gdk3_wayland" = x"yes"])
 
 if test x"$enable_xim" = x"yes"; then
     # Check for x11
@@ -277,8 +290,14 @@ if test x"$enable_wayland" = x"yes"; then
         wayland-client >= 1.2.0
         xkbcommon
     ])
+    m4_ifdef([WAYLAND_SCANNER_RULES],
+             [WAYLAND_PRTCLS_SUBDIR='wayland-protocols/unstable/input-method'
+              AC_SUBST(WAYLAND_PRTCLS_SUBDIR)
+              WAYLAND_SCANNER_RULES(['$(datadir)/$(WAYLAND_PRTCLS_SUBDIR)'])],
+             [AC_SUBST(wayland_scanner_rules)])
 else
     enable_wayland="no (disabled, use --enable-wayland to enable)"
+    AC_SUBST(wayland_scanner_rules)
 fi
 
 enable_appindicator_engine_icon="no"
@@ -306,7 +325,7 @@ GOBJECT_INTROSPECTION_CHECK([0.6.8])
 
 IBUS_GIR_SCANNERFLAGS=
 if test x"$found_introspection" = x"yes" ; then
-    IBUS_GIR_SCANNERFLAGS="--warn-all --identifier-prefix=IBus --symbol-prefix=ibus"
+    IBUS_GIR_SCANNERFLAGS="--warn-all --identifier-prefix=IBus --symbol-prefix=ibus --c-include=ibus.h"
     PKG_CHECK_EXISTS([gobject-introspection-1.0 >= 0.9.6],
                      [gir_symbol_prefix=yes],
                      [gir_symbol_prefix=no])
@@ -329,33 +348,6 @@ fi
 PKG_CHECK_MODULES(DBUS, [
     dbus-1
 ])
-
-# --enable-gconf option.
-AC_ARG_ENABLE(gconf,
-    AS_HELP_STRING([--enable-gconf],
-                   [Use GConf code]),
-    [enable_gconf=$enableval],
-    [enable_gconf=no]
-)
-AM_CONDITIONAL([ENABLE_GCONF], [test x"$enable_gconf" = x"yes"])
-
-if test x"$enable_gconf" = x"yes"; then
-    # check gconf
-    PKG_CHECK_MODULES(GCONF,
-        [gconf-2.0 >= 2.12],
-    )
-
-    AC_PATH_PROG(GCONFTOOL, gconftool-2, no)
-    if test x"$GCONFTOOL" = xno; then
-        AC_MSG_ERROR([gconftool-2 executable not found in your path - should be installed with GConf])
-    fi
-
-    AM_GCONF_SOURCE_2
-    # GCONF_SCHEMAS_INSTALL should be set in macro AM_GCONF_SOURCE_2
-else
-    AM_CONDITIONAL([GCONF_SCHEMAS_INSTALL], [false])
-    enable_gconf="no (disabled, use --enable-gconf to enable)"
-fi
 
 # --enable-memconf option.
 AC_ARG_ENABLE(memconf,
@@ -391,6 +383,14 @@ fi
 AC_PATH_PROG(ENV_IBUS_TEST, env)
 AC_SUBST(ENV_IBUS_TEST)
 
+AC_ARG_ENABLE(python2,
+    AS_HELP_STRING([--disable-python2],
+                   [Do not install bindings/pygobject/gi and ibus for python2.
+                    '--disable-python2' bring '--disable-python-library'.]),
+    [enable_python2=$enableval],
+    [enable_python2=yes]
+)
+
 AC_ARG_ENABLE(python-library,
     AS_HELP_STRING([--enable-python-library],
                    [Use ibus python library]),
@@ -405,10 +405,6 @@ AC_ARG_ENABLE(setup,
     [enable_setup=yes]
 )
 
-AM_CONDITIONAL([ENABLE_PYTHON_LIBRARY], [test x"$enable_python_library" = x"yes"])
-AM_CONDITIONAL([ENABLE_SETUP], [test x"$enable_setup" = x"yes"])
-AM_CONDITIONAL([ENABLE_DAEMON], [true])
-
 # Define python version
 AC_ARG_WITH(python,
     AS_HELP_STRING([--with-python[=PATH]],
@@ -417,11 +413,23 @@ AC_ARG_WITH(python,
 )
 
 AM_PATH_PYTHON([2.5])
-AC_PATH_PROG(PYTHON2, python2)
 
-if test x"$PYTHON2" = x""; then
-    PYTHON2=$PYTHON
+if test x"$enable_python2" != x"yes"; then
+    enable_python_library=no
+    PYTHON2=
+    enable_python2="no (disabled, use --enable-python2 to enable)"
+else
+    AC_PATH_PROG(PYTHON2, python2)
+
+    if test x"$PYTHON2" = x""; then
+        PYTHON2=$PYTHON
+    fi
 fi
+
+AM_CONDITIONAL([ENABLE_PYTHON2], [test x"$enable_python2" = x"yes"])
+AM_CONDITIONAL([ENABLE_PYTHON_LIBRARY], [test x"$enable_python_library" = x"yes"])
+AM_CONDITIONAL([ENABLE_SETUP], [test x"$enable_setup" = x"yes"])
+AM_CONDITIONAL([ENABLE_DAEMON], [true])
 
 PYGOBJECT_REQUIRED=3.0.0
 
@@ -434,8 +442,10 @@ if test "x$enable_pygobject" = "xyes"; then
     pyoverridesdir=`$PYTHON -c "import gi; print(gi._overridesdir)"`
     AC_SUBST(pyoverridesdir)
 
-    py2overridesdir=`$PYTHON2 -c "import gi; print(gi._overridesdir)"`
-    AC_SUBST(py2overridesdir)
+    if test x"$enable_python2" = x"yes"; then
+        py2overridesdir=`$PYTHON2 -c "import gi; print(gi._overridesdir)"`
+        AC_SUBST(py2overridesdir)
+    fi
 fi
 
 AM_CONDITIONAL(ENABLE_PYGOBJECT, test x"$enable_pygobject" = "xyes")
@@ -588,20 +598,25 @@ if test x"$enable_engine" = x"yes"; then
     enable_engine="yes (enabled, use --disable-engine to disable)"
 fi
 
-# --disable-libnotify
-AC_ARG_ENABLE(libnotify,
-    AS_HELP_STRING([--disable-libnotify],
-                   [Disable to link libnotify]),
-    [enable_libnotify=$enableval],
-    [enable_libnotify=yes]
+PKG_CHECK_MODULES(XTEST,
+    [x11 xtst],
+    [enable_xtest=yes],
+    [enable_xtest=no]
 )
-AM_CONDITIONAL([ENABLE_LIBNOTIFY], [test x"$enable_libnotify" = x"yes"])
-if test x"$enable_libnotify" = x"yes"; then
-    PKG_CHECK_MODULES(LIBNOTIFY, [
-        libnotify >= 0.7
-    ])
-    enable_libnotify="yes (enabled, use --disable-libnotify to disable)"
+AM_CONDITIONAL([ENABLE_XTEST], [test x"$enable_xtest" = x"yes"])
+
+# --enable-install-tests
+AC_ARG_ENABLE(install-tests,
+    AS_HELP_STRING([--enable-install-tests],
+                   [Enable to install tests]),
+    [enable_install_tests=$enableval],
+    [enable_install_tests=no]
+)
+AM_CONDITIONAL([ENABLE_INSTALL_TESTS], [test x"$enable_install_tests" = x"yes"])
+if test x"$enable_install_tests" = x"no"; then
+    enable_install_tests="no (disabled, use --enable-install-tests to enable)"
 fi
+
 
 # --disable-emoji-dict option.
 AC_ARG_ENABLE(emoji-dict,
@@ -666,7 +681,7 @@ AC_ARG_WITH(ucd-dir,
     AS_HELP_STRING([--with-ucd-dir[=DIR]],
         [Set the directory of UCD (Unicode Character Database) files.
          (default: "/usr/share/unicode/ucd")]),
-    UCD_DIR=$with_emoji_annotation_dir,
+    UCD_DIR=$with_ucd_dir,
     UCD_DIR="/usr/share/unicode/ucd"
 )
 AC_SUBST(UCD_DIR)
@@ -687,6 +702,32 @@ the UCD files from https://www.unicode.org/Public/UNIDATA/)
     fi
     enable_unicode_dict="yes (enabled, use --disable-unicode-dict to disable)"
 fi
+
+AC_ARG_WITH(socket-dir,
+    AS_HELP_STRING([--with-socket-dir[=DIR]],
+        [Set the default socket directory to connect ibus-daemon with D-Bus
+         connections (default: "$XDG_CACHE_HOME/ibus").
+         The best practice of the socket directory would be unique per user
+         not to modify by malicious users but XDG_RUNTIME_DIR is not integrated
+         in BSD systems and the BSD's default is "/tmp".
+         XDG_RUMTIME_DIR is not useful now because XDG_RUMTIME_DIR is available
+         by login but not `su` command but ibus-daemon can be run with su.
+         "$XDG_RUMTIME_DIR", "$XDG_CACHE_HOME", "$UID" are extracted by
+         ibus-daemon.
+         ibus-daemon also runs mkdir for the socket directory since BSD
+         systems do not support abstract socket paths.
+         The socket path on a NFS mount would not be a good idea likes
+         "/home/$USER" because the directory is not sometimes accessible
+         with the network condition.]),
+    [IBUS_SOCKET_DIR=$with_socket_dir],
+    [case $host in
+         *linux*) IBUS_SOCKET_DIR='unix:tmpdir=$XDG_CACHE_HOME/ibus';;
+         *)       IBUS_SOCKET_DIR='unix:tmpdir=/tmp';;
+     esac]
+
+)
+AC_DEFINE_UNQUOTED(IBUS_SOCKET_DIR, "$IBUS_SOCKET_DIR",
+                   [The default socket directory to connect ibus-daemon.])
 
 # Check iso-codes.
 PKG_CHECK_MODULES(ISOCODES, [
@@ -718,6 +759,7 @@ util/IMdkit/Makefile
 data/Makefile
 data/annotations/Makefile
 data/icons/Makefile
+data/its/Makefile
 data/keymaps/Makefile
 data/dconf/Makefile
 docs/Makefile
@@ -731,12 +773,10 @@ ibus/interface/Makefile
 ui/Makefile
 ui/gtk3/Makefile
 setup/Makefile
-setup/ibus-setup
 bindings/Makefile
 bindings/pygobject/Makefile
 bindings/vala/Makefile
 conf/Makefile
-conf/gconf/Makefile
 conf/dconf/Makefile
 conf/memconf/Makefile
 tools/Makefile
@@ -752,16 +792,17 @@ Build options:
   CFLAGS                        $CFLAGS
   PYTHON                        $PYTHON
   PYTHON2                       $PYTHON2
+  Enable python2                $enable_python2
   Gtk2 immodule dir             $GTK2_IM_MODULEDIR
   Gtk3 immodule dir             $GTK3_IM_MODULEDIR
   Build gtk2 immodule           $enable_gtk2
   Build gtk3 immodule           $enable_gtk3
   Build XIM agent server        $enable_xim
   Build wayland support         $enable_wayland
+  Build gdk3 wayland support    $enable_gdk3_wayland
   Build appindicator support    $enable_appindicator
   Build appindicator engine icon $enable_appindicator_engine_icon
   Build python library          $enable_python_library
-  Build gconf modules           $enable_gconf
   Build memconf modules         $enable_memconf
   Build dconf modules           $enable_dconf
   Build introspection           $found_introspection
@@ -774,12 +815,13 @@ Build options:
   No snooper regexes            "$NO_SNOOPER_APPS"
   Panel icon                    "$IBUS_ICON_KEYBOARD"
   Enable surrounding-text       $enable_surrounding_text
-  Enable libnotify              $enable_libnotify
   Enable Emoji dict             $enable_emoji_dict
   Unicode Emoji directory       $UNICODE_EMOJI_DIR
   CLDR annotation directory     $EMOJI_ANNOTATION_DIR
   Enable Unicode dict           $enable_unicode_dict
   UCD directory                 $UCD_DIR
+  Socket directory              "$IBUS_SOCKET_DIR"
   Run test cases                $enable_tests
+  Install tests                 $enable_install_tests
 ])
 
